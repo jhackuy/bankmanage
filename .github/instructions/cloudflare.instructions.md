@@ -13,3 +13,5 @@ applyTo: "wrangler.jsonc,wrangler.toml,src/adapters/**,src/worker/**,src/routes/
 - Health endpoints expose only minimal liveness/readiness information and no secrets, IDs, SQL errors or environment details.
 - Do not add another cloud service or persistence system without an accepted ADR.
 - GitHub Actions deployments receive secrets only in deployment jobs. Copilot development tasks should work with fakes/local bindings without real credentials.
+- HARD CI/secret boundary: any workflow or job triggered by `pull_request` or running on a Copilot development branch MUST NOT reference the `pilot` GitHub Environment, Cloudflare/Telegram deployment secrets, or any other production/pilot credential.
+- The `pilot` Environment may be referenced only by deployment jobs that run from the protected/default `main` branch after accepted code has been merged. PR validation must remain credential-free and use fakes/local bindings.
