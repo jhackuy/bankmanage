@@ -8,8 +8,6 @@ updates:
       time: "04:00"
       timezone: "Asia/Manila"
     open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
     commit-message:
       prefix: "deps"
 
@@ -20,7 +18,5 @@ updates:
       time: "04:30"
       timezone: "Asia/Manila"
     open-pull-requests-limit: 3
-    labels:
-      - "dependencies"
     commit-message:
       prefix: "ci-deps"
