@@ -40,6 +40,7 @@ export function applyBackButton(
     btn.show();
     btn.onClick(onBack);
   } else {
+    btn.offClick(onBack);
     btn.hide();
   }
   return () => {
