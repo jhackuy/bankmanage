@@ -1,5 +1,5 @@
 /** @jsxImportSource preact */
-import { useState } from "preact/hooks";
+import { useCallback, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { TabBar } from "./components/TabBar.js";
 import type { TabId } from "./components/tabs.js";
@@ -8,6 +8,7 @@ import { ReceiptPage } from "./pages/ReceiptPage.js";
 import { DepositsPage } from "./pages/DepositsPage.js";
 import { TransactionsPage } from "./pages/TransactionsPage.js";
 import { MorePage } from "./pages/MorePage.js";
+import { useTelegramBackButton } from "./hooks/useTelegramBackButton.js";
 
 function renderPage(tab: TabId): JSX.Element {
   switch (tab) {
@@ -26,6 +27,10 @@ function renderPage(tab: TabId): JSX.Element {
 
 export function App(): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>("home");
+
+  // Show the Telegram BackButton on any non-home tab; tapping it returns to Home.
+  const handleBack = useCallback(() => setActiveTab("home"), []);
+  useTelegramBackButton(activeTab !== "home", handleBack);
 
   return (
     <div class="app-shell">
