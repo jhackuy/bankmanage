@@ -1,0 +1,3 @@
+# Ecosystem smoke test
+
+Temporary non-production file used to verify GitHub Project auto-add, Copilot automatic code review, ChatGPT Work PR trigger, and Slack reporting. No application code or secrets.
