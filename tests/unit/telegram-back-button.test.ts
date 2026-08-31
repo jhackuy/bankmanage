@@ -8,10 +8,7 @@
  */
 import { strict as assert } from "node:assert";
 import { describe, it } from "vitest";
-import {
-  applyBackButton,
-  type TelegramBackButton,
-} from "../../src/ui/hooks/useTelegramBackButton.js";
+import { applyBackButton, type TelegramBackButton } from "../../src/ui/hooks/useTelegramBackButton.js";
 
 function makeMockButton(): TelegramBackButton & {
   _shown: boolean;

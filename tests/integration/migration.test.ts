@@ -186,4 +186,23 @@ describe("D1 migrations", () => {
       ).run();
     }).toThrow();
   });
+  it("enforces one Telegram identity per household member", () => {
+    applyMigrations(db);
+    const member = db
+      .prepare("INSERT INTO household_members (role, display_name) VALUES ('OWNER', 'Test Owner')")
+      .run();
+
+    db.prepare("INSERT INTO telegram_identities (member_id, telegram_user_id) VALUES (?, ?)").run(
+      member.lastInsertRowid,
+      "100000001"
+    );
+
+    expect(() => {
+      db.prepare("INSERT INTO telegram_identities (member_id, telegram_user_id) VALUES (?, ?)").run(
+        member.lastInsertRowid,
+        "100000002"
+      );
+    }).toThrow();
+  });
+
 });

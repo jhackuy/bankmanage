@@ -20,9 +20,7 @@ declare const Telegram: { WebApp: TelegramWebApp } | undefined;
 
 /** Returns the Telegram BackButton if available in the current context. */
 export function getTelegramBackButton(): TelegramBackButton | undefined {
-  return typeof Telegram !== "undefined"
-    ? Telegram.WebApp?.BackButton
-    : undefined;
+  return typeof Telegram !== "undefined" ? Telegram.WebApp?.BackButton : undefined;
 }
 
 /**
@@ -31,11 +29,7 @@ export function getTelegramBackButton(): TelegramBackButton | undefined {
  *
  * Exported for unit testing; call sites should use useTelegramBackButton.
  */
-export function applyBackButton(
-  btn: TelegramBackButton,
-  visible: boolean,
-  onBack: () => void,
-): () => void {
+export function applyBackButton(btn: TelegramBackButton, visible: boolean, onBack: () => void): () => void {
   if (visible) {
     btn.show();
     btn.onClick(onBack);

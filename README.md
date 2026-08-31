@@ -69,7 +69,7 @@ npm run lint
 # Strict typecheck (Worker code + test code)
 npm run typecheck
 
-# Unit + integration tests (60 tests, no secrets required)
+# Unit + integration tests (no secrets required)
 npm test
 
 # Migration check — applies all SQL migrations to a fresh in-memory SQLite DB
@@ -123,6 +123,7 @@ bankmanage/
 │       ├── components/       # TabBar, tab definitions
 │       ├── pages/            # Home, Receipt, Deposits, Transactions, More
 │       ├── styles/           # CSS (360/390/430px responsive, Telegram theme vars)
+│       ├── hooks/            # Telegram BackButton integration
 │       ├── App.tsx           # Root Preact component
 │       └── main.tsx          # UI entry point
 ├── tests/
@@ -132,7 +133,8 @@ bankmanage/
 │       ├── auth-boundary.test.ts      # Telegram auth boundary (9 tests)
 │       ├── bank-seed.test.ts          # Bank config data (10 tests)
 │       ├── fixture-discipline.test.ts # Synthetic fixture checks (6 tests)
-│       ├── health-endpoint.test.ts    # /health endpoint (5 tests)
+│       ├── health-endpoint.test.ts      # /health endpoint (5 tests)
+│       ├── telegram-back-button.test.ts # Telegram navigation behavior
 │       └── r2-fake-adapter.test.ts    # R2 fake adapter (10 tests)
 ├── index.html                # Mini App HTML entry point
 ├── vite.config.ts            # Vite build config

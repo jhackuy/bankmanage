@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import preact from "@preact/preset-vite";
 
@@ -13,8 +14,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@ui": "/src/ui",
-      "@data": "/data",
+      "@ui": fileURLToPath(new URL("./src/ui", import.meta.url)),
+      "@data": fileURLToPath(new URL("./data", import.meta.url)),
     },
   },
 });
