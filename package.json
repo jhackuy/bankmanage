@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run dev:worker\" \"npm run dev:ui\"",
-    "predev:worker": "test -d dist/ui || npm run build:ui",
+    "predev:worker": "node --input-type=module -e \"import { spawnSync } from 'node:child_process'; import { existsSync } from 'node:fs'; if (!existsSync('dist/ui')) { const command = process.platform === 'win32' ? 'npm.cmd' : 'npm'; const result = spawnSync(command, ['run', 'build:ui'], { stdio: 'inherit' }); process.exit(result.status ?? 1); }\"",
     "dev:worker": "wrangler dev --env pilot",
     "dev:ui": "vite --config vite.config.ts",
     "build": "npm run build:ui && npm run build:worker",
