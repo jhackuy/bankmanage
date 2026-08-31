@@ -1,5 +1,7 @@
 # bankmanage
 
+[📊 查看开发流程和项目进度](PROJECT_STATUS.md)
+
 家庭银行存单、资产与日常财务管理工具。
 
 当前阶段：**Cloudflare-first pilot**。GitHub Copilot cloud agent 是主要开发 Agent，所有实现必须以仓库内 `SPEC.md` 为业务事实源。
