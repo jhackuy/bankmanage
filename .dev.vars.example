@@ -20,4 +20,5 @@ TELEGRAM_WEBHOOK_SECRET=
 TELEGRAM_ALLOWED_USER_IDS=
 
 # Optional: app environment override for local dev
+# Valid values are environment labels such as development, test, or pilot.
 APP_ENV=
