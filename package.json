@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run dev:worker\" \"npm run dev:ui\"",
-    "predev:worker": "npm run build:ui",
+    "predev:worker": "test -d dist/ui || npm run build:ui",
     "dev:worker": "wrangler dev --env pilot",
     "dev:ui": "vite --config vite.config.ts",
     "build": "npm run build:ui && npm run build:worker",
