@@ -2,7 +2,7 @@
 
 家庭银行存单、资产与日常财务管理工具。
 
-当前阶段：**Cloudflare-first pilot**。GitHub Copilot cloud agent 是主要开发 Agent，所有实现必须以仓库内 `SPEC.md` 为业务事实源。
+当前阶段：**Cloudflare-first pilot (M0)**。GitHub Copilot cloud agent 是主要开发 Agent，所有实现必须以仓库内 `SPEC.md` 为业务事实源。
 
 ## 核心目标
 
@@ -36,3 +36,159 @@
 - 真实家庭财务金额明细或可识别个人的数据。
 
 仓库测试 fixture 必须是人工构造或完全脱敏数据。
+
+---
+
+## Local development
+
+### Requirements
+
+- Node.js ≥ 20, npm ≥ 10
+- (Optional for Cloudflare deployment) Wrangler CLI — included as a dev dependency
+
+### Setup
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Copy the environment template (no real secrets needed for tests/CI)
+cp .dev.vars.example .dev.vars
+# Edit .dev.vars only if you need real Telegram/Cloudflare integration locally.
+```
+
+### Run all checks
+
+```bash
+# Format check
+npm run format:check
+
+# Lint
+npm run lint
+
+# Strict typecheck (Worker code + test code)
+npm run typecheck
+
+# Unit + integration tests (60 tests, no secrets required)
+npm test
+
+# Migration check — applies all SQL migrations to a fresh in-memory SQLite DB
+npm run migrate:check
+
+# Full production build (Vite UI + Wrangler dry-run)
+npm run build
+```
+
+### Local development server
+
+```bash
+# Start Worker + UI concurrently (requires a .dev.vars file)
+npm run dev
+```
+
+### Run tests in watch mode
+
+```bash
+npm run test:watch
+```
+
+---
+
+## Project structure
+
+```
+bankmanage/
+├── data/
+│   └── config/
+│       └── banks.ts          # System bank seed data (BDO, BPI, Metrobank, PNB, HSBC, Other)
+├── migrations/
+│   └── 0001_foundation.sql   # D1 schema: households, banks, accounts, categories, currencies
+├── scripts/
+│   └── migrate-check.mjs     # CI migration verification script
+├── src/
+│   ├── adapters/
+│   │   ├── ocr/              # OCR adapter interface (M3)
+│   │   ├── storage/          # R2 document storage interface + fake adapter
+│   │   └── telegram/         # Telegram adapter interface + fake adapter
+│   ├── worker/
+│   │   ├── routes/
+│   │   │   └── health.ts     # GET /health — minimal liveness endpoint
+│   │   ├── env.ts            # Worker environment bindings type
+│   │   └── index.ts          # Hono Worker entry point
+│   └── ui/
+│       ├── components/       # TabBar, tab definitions
+│       ├── pages/            # Home, Receipt, Deposits, Transactions, More
+│       ├── styles/           # CSS (360/390/430px responsive, Telegram theme vars)
+│       ├── App.tsx           # Root Preact component
+│       └── main.tsx          # UI entry point
+├── tests/
+│   ├── integration/
+│   │   └── migration.test.ts # Fresh-DB migration tests (20 assertions)
+│   └── unit/
+│       ├── auth-boundary.test.ts      # Telegram auth boundary (9 tests)
+│       ├── bank-seed.test.ts          # Bank config data (10 tests)
+│       ├── fixture-discipline.test.ts # Synthetic fixture checks (6 tests)
+│       ├── health-endpoint.test.ts    # /health endpoint (5 tests)
+│       └── r2-fake-adapter.test.ts    # R2 fake adapter (10 tests)
+├── index.html                # Mini App HTML entry point
+├── vite.config.ts            # Vite build config
+├── vitest.config.ts          # Vitest test config
+├── wrangler.jsonc            # Cloudflare Workers config (pilot env, placeholder IDs)
+├── tsconfig.json             # TypeScript config (Worker code)
+├── tsconfig.test.json        # TypeScript config (test code, Node types)
+└── .dev.vars.example         # Secret variable names template (no values)
+```
+
+---
+
+## Cloudflare pilot setup
+
+> These steps require a Cloudflare account and a Telegram Bot. They are not needed for local tests or CI.
+
+### 1. Create D1 database
+
+```bash
+npx wrangler d1 create bankmanage-pilot
+# Copy the database_id into wrangler.jsonc env.pilot.d1_databases[0].database_id
+```
+
+### 2. Apply D1 migrations
+
+```bash
+npx wrangler d1 execute bankmanage-pilot --env pilot --file migrations/0001_foundation.sql --remote
+```
+
+### 3. Create R2 bucket
+
+```bash
+npx wrangler r2 bucket create bankmanage-pilot-docs
+```
+
+### 4. Set Cloudflare secrets
+
+```bash
+# Never commit real values — set them here only
+npx wrangler secret put TELEGRAM_BOT_TOKEN --env pilot
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET --env pilot
+npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS --env pilot
+```
+
+### 5. Deploy
+
+```bash
+npm run build
+npx wrangler deploy --env pilot
+```
+
+---
+
+## Milestones
+
+| Milestone | Status  | Description                                         |
+| --------- | ------- | --------------------------------------------------- |
+| **M0**    | ✅ Done | Scaffold, CI, D1 schema, adapters, Mini App shell   |
+| M1        | Pending | Term deposits, interest calculations, state machine |
+| M2        | Pending | Household ledger, quick expenses, reconciliation    |
+| M3        | Pending | Private R2 document upload, OCR adapter             |
+| M4        | Pending | Telegram webhook, initData auth, Bot reminders      |
+| M5        | Pending | Pilot deployment, smoke tests, security review      |

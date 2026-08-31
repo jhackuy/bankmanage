@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "copilot/**"]
+  pull_request:
+    branches: [main]
+
+# Only one CI run per branch/PR at a time
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Install · Lint · Typecheck · Test · Migrate · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # 1. Lockfile install — verifies package-lock.json is up to date
+      - name: Install dependencies
+        run: npm ci
+
+      # 2. Format check
+      - name: Format check
+        run: npm run format:check
+
+      # 3. Lint
+      - name: Lint
+        run: npm run lint
+
+      # 4. Strict typecheck
+      - name: Typecheck
+        run: npm run typecheck
+
+      # 5. Unit + integration tests
+      - name: Test
+        run: npm test
+
+      # 6. Migration check — apply all migrations to a fresh in-memory SQLite DB
+      - name: Migration check
+        run: npm run migrate:check
+
+      # 7. Production build
+      - name: Build
+        run: npm run build

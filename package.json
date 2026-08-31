@@ -1,0 +1,47 @@
+{
+  "name": "bankmanage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Family bank deposit and daily finance manager — Cloudflare pilot",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:worker\" \"npm run dev:ui\"",
+    "dev:worker": "wrangler dev --env pilot",
+    "dev:ui": "vite src/ui --config vite.config.ts",
+    "build": "npm run build:ui && npm run build:worker",
+    "build:ui": "vite build --config vite.config.ts",
+    "build:worker": "wrangler deploy --dry-run --env pilot --outdir dist/worker",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate:check": "node scripts/migrate-check.mjs",
+    "deploy": "wrangler deploy --env pilot"
+  },
+  "dependencies": {
+    "hono": "4.13.5",
+    "preact": "10.25.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260831.1",
+    "@preact/preset-vite": "2.9.3",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.4.0",
+    "@typescript-eslint/eslint-plugin": "8.38.0",
+    "@typescript-eslint/parser": "8.38.0",
+    "better-sqlite3": "11.9.1",
+    "concurrently": "9.2.0",
+    "eslint": "9.32.0",
+    "prettier": "3.5.3",
+    "typescript": "5.8.3",
+    "vite": "6.4.3",
+    "vitest": "3.2.7",
+    "wrangler": "4.127.1"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}

@@ -1,0 +1,53 @@
+// wrangler.jsonc — Cloudflare Workers configuration for BankManage
+// All binding names are placeholders. Real secrets live in GitHub Actions Secrets
+// and Cloudflare Worker secrets; never in this file.
+{
+  "name": "bankmanage",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2024-12-30",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Static assets from the UI build
+  "assets": {
+    "directory": "dist/ui",
+    "binding": "ASSETS",
+  },
+
+  // Environment-specific configuration
+  "env": {
+    "pilot": {
+      "name": "bankmanage-pilot",
+
+      // D1 database — bind name used in Worker code; db_name / database_id are pilot placeholders
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bankmanage-pilot",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+        },
+      ],
+
+      // R2 bucket for private financial documents (receipts, deposit certificates, settlement evidence)
+      // Bucket is never public; all document access goes through authenticated application routes
+      "r2_buckets": [
+        {
+          "binding": "DOCUMENTS",
+          "bucket_name": "bankmanage-pilot-docs",
+        },
+      ],
+
+      // Cron Triggers for reminder scanning
+      "triggers": {
+        "crons": ["0 0 * * *"],
+      },
+
+      // Non-secret configuration vars (values shown are examples — override in Cloudflare dashboard)
+      // Secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, TELEGRAM_ALLOWED_USER_IDS)
+      // must be set via: wrangler secret put SECRET_NAME --env pilot
+      "vars": {
+        "APP_ENV": "pilot",
+        "LOG_LEVEL": "info",
+      },
+    },
+  },
+}
