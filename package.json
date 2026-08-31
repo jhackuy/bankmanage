@@ -27,8 +27,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260831.1",
     "@preact/preset-vite": "2.9.3",
-    "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.4.0",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.4.0",
     "@typescript-eslint/eslint-plugin": "8.38.0",
     "@typescript-eslint/parser": "8.38.0",
     "better-sqlite3": "11.9.1",

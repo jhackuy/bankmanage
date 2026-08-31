@@ -36,11 +36,6 @@
         },
       ],
 
-      // Cron Triggers for reminder scanning
-      "triggers": {
-        "crons": ["0 0 * * *"],
-      },
-
       // Non-secret configuration vars (values shown are examples — override in Cloudflare dashboard)
       // Secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, TELEGRAM_ALLOWED_USER_IDS)
       // must be set via: wrangler secret put SECRET_NAME --env pilot

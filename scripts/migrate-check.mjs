@@ -62,6 +62,9 @@ try {
   console.log("\nMigration check PASSED.");
   process.exit(0);
 } catch (err) {
-  console.error("\nMigration check FAILED:", err.message);
+  console.error(
+    "\nMigration check FAILED:",
+    err instanceof Error ? err.message : String(err),
+  );
   process.exit(1);
 }
