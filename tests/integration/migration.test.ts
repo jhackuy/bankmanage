@@ -186,6 +186,7 @@ describe("D1 migrations", () => {
       ).run();
     }).toThrow();
   });
+
   it("enforces one Telegram identity per household member", () => {
     applyMigrations(db);
     const member = db
@@ -204,5 +205,4 @@ describe("D1 migrations", () => {
       );
     }).toThrow();
   });
-
 });
