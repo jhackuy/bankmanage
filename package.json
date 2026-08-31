@@ -6,8 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run dev:worker\" \"npm run dev:ui\"",
+    "predev:worker": "npm run build:ui",
     "dev:worker": "wrangler dev --env pilot",
-    "dev:ui": "vite src/ui --config vite.config.ts",
+    "dev:ui": "vite --config vite.config.ts",
     "build": "npm run build:ui && npm run build:worker",
     "build:ui": "vite build --config vite.config.ts",
     "build:worker": "wrangler deploy --dry-run --env pilot --outdir dist/worker",

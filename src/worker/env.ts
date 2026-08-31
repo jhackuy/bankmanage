@@ -9,7 +9,7 @@ export interface Env {
   // R2 private document bucket
   DOCUMENTS: R2Bucket;
   // Static assets (Vite-built UI)
-  ASSETS: Fetcher;
+  ASSETS?: Fetcher;
   // Non-secret vars
   APP_ENV: string;
   LOG_LEVEL?: string;

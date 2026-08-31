@@ -50,7 +50,7 @@
 
 ```bash
 # 1. Install dependencies
-npm install
+npm ci
 
 # 2. Copy the environment template (no real secrets needed for tests/CI)
 cp .dev.vars.example .dev.vars
@@ -85,6 +85,10 @@ npm run build
 # Start Worker + UI concurrently (requires a .dev.vars file)
 npm run dev
 ```
+
+The Worker dev process builds the current UI shell once before startup so Wrangler's
+local `ASSETS` binding has a concrete `dist/ui` directory, while the Vite server
+continues to provide live UI development feedback.
 
 ### Run tests in watch mode
 
