@@ -28,7 +28,7 @@ export function App(): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>("home");
 
   return (
-    <div id="app">
+    <div class="app-shell">
       <main class="main-content" role="main">
         {renderPage(activeTab)}
       </main>

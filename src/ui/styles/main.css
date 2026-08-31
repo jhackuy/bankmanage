@@ -33,11 +33,12 @@ body {
 }
 
 /* ── App layout ─────────────────────────────────────────────────────────── */
-#app {
+#app,
+.app-shell {
   display: flex;
   flex-direction: column;
+  min-height: 100vh; /* fallback for browsers without dvh support */
   min-height: 100dvh;
-  min-height: 100vh; /* fallback */
   max-width: 100%;
   overflow-x: hidden;
 }
