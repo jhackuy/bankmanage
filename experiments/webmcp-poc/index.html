@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Personal Brain WebMCP PoC</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;background:#0b0b0b;color:#eee}
+    .card{border:1px solid #333;border-radius:14px;padding:20px;background:#151515;margin:16px 0}
+    code{background:#222;padding:2px 6px;border-radius:6px}.ok{color:#7ee787}.warn{color:#f2cc60}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #444;background:#222;color:#fff;cursor:pointer}
+  </style>
+</head>
+<body>
+  <h1>Personal Brain WebMCP PoC</h1>
+  <div class="card">
+    <div id="support">Checking WebMCP support…</div>
+    <p>Registered tools: <code>brain_ping</code>, <code>brain_read_test</code>, <code>brain_write_test</code></p>
+    <button id="showState">Show saved test value</button>
+    <pre id="state"></pre>
+  </div>
+
+<script>
+(() => {
+  const supportEl = document.getElementById('support');
+  const context = document.modelContext;
+
+  if (!context?.registerTool) {
+    supportEl.innerHTML = '<span class="warn">WebMCP not available in this browser/page context.</span>';
+    return;
+  }
+
+  const lifecycle = new AbortController();
+  const register = (tool) => Promise.resolve(context.registerTool(tool, { signal: lifecycle.signal }));
+
+  const tools = [
+    {
+      name: 'brain_ping',
+      title: 'Ping Personal Brain',
+      description: 'Check whether ChatGPT can call this Personal Brain WebMCP page. Use this for connectivity testing.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: false },
+      async execute() {
+        return { ok: true, message: 'PONG FROM PERSONAL BRAIN WEBMCP', timestamp: new Date().toISOString() };
+      }
+    },
+    {
+      name: 'brain_read_test',
+      title: 'Read Personal Brain Test Value',
+      description: 'Read the current test value stored by this WebMCP proof page.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, untrustedContentHint: false },
+      async execute() {
+        return { ok: true, value: localStorage.getItem('brain_test_value') || 'EMPTY' };
+      }
+    },
+    {
+      name: 'brain_write_test',
+      title: 'Write Personal Brain Test Value',
+      description: 'Write a harmless test value to browser local storage for this WebMCP proof page.',
+      inputSchema: {
+        type: 'object',
+        properties: { value: { type: 'string', minLength: 1, maxLength: 200 } },
+        required: ['value'],
+        additionalProperties: false
+      },
+      annotations: { readOnlyHint: false, untrustedContentHint: false },
+      async execute(input) {
+        const value = String(input?.value ?? '').slice(0, 200);
+        if (!value) throw new Error('value is required');
+        localStorage.setItem('brain_test_value', value);
+        return { ok: true, saved: value };
+      }
+    }
+  ];
+
+  Promise.all(tools.map(register))
+    .then(() => { supportEl.innerHTML = '<span class="ok">WebMCP available. 3 tools registered.</span>'; })
+    .catch((err) => { supportEl.textContent = 'WebMCP registration error: ' + String(err); });
+
+  document.getElementById('showState').addEventListener('click', () => {
+    document.getElementById('state').textContent = localStorage.getItem('brain_test_value') || 'EMPTY';
+  });
+
+  window.addEventListener('beforeunload', () => lifecycle.abort(), { once: true });
+})();
+</script>
+</body>
+</html>
