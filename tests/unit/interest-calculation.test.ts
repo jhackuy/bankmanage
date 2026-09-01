@@ -190,6 +190,12 @@ describe("input validation", () => {
       calculateSimpleInterest(makeInputs({ startDate: "not-a-date", maturityDate: "2026-04-01" }))
     ).toThrow(/Invalid ISO date/);
   });
+
+  it("rejects impossible calendar dates instead of normalizing them", () => {
+    expect(() =>
+      calculateSimpleInterest(makeInputs({ startDate: "2026-02-30", maturityDate: "2026-04-01" }))
+    ).toThrow(/Invalid calendar date/);
+  });
 });
 
 // ── Rounding boundaries ─────────────────────────────────────────────────────
@@ -290,6 +296,21 @@ describe("ACT_ACT explicit contract", () => {
       })
     );
     expect(result.grossInterestMinor).toBe(1_000);
+  });
+
+  it("splits a cross-year interval across its 365/366 denominators", () => {
+    const result = calculateSimpleInterest(
+      makeInputs({
+        principalMinor: 133_590,
+        annualRateScaled: 1_000_000,
+        taxRateScaled: 0,
+        startDate: "2023-07-01",
+        maturityDate: "2024-07-01",
+        dayCountBasis: "ACT_ACT",
+      })
+    );
+    // 133590 * (184/365 + 182/366) = 133774 exactly.
+    expect(result.grossInterestMinor).toBe(133_774);
   });
 });
 
