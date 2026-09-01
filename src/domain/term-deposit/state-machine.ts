@@ -142,10 +142,7 @@ export function transition(req: TransitionRequest): TransitionResult {
 
 // ── Gate validation ─────────────────────────────────────────────────────────
 
-function validateClosureGate(
-  to: TermDepositState,
-  gate: ClosureGateInput | undefined
-): TransitionResult {
+function validateClosureGate(to: TermDepositState, gate: ClosureGateInput | undefined): TransitionResult {
   switch (to) {
     case "SETTLED_TO_ACCOUNT":
       return validateSettleGate(gate, "SETTLE_TO_ACCOUNT");
@@ -185,10 +182,7 @@ function validateSettleGate(
   if (!isIsoDate(gate.actualSettlementDate)) {
     return { ok: false, reason: "actualSettlementDate must be ISO YYYY-MM-DD" };
   }
-  if (
-    !Number.isInteger(gate.actualReceivedTotalMinor) ||
-    gate.actualReceivedTotalMinor < 0
-  ) {
+  if (!Number.isInteger(gate.actualReceivedTotalMinor) || gate.actualReceivedTotalMinor < 0) {
     return { ok: false, reason: "actualReceivedTotalMinor must be a non-negative integer" };
   }
   for (const [name, value] of [
@@ -200,10 +194,7 @@ function validateSettleGate(
       return { ok: false, reason: `${name} must be a non-negative integer` };
     }
   }
-  if (
-    typeof gate.balancedLedgerRef !== "string" ||
-    gate.balancedLedgerRef.trim() === ""
-  ) {
+  if (typeof gate.balancedLedgerRef !== "string" || gate.balancedLedgerRef.trim() === "") {
     return { ok: false, reason: "balancedLedgerRef is required" };
   }
   return { ok: true };
