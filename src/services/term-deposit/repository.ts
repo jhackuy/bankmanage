@@ -114,13 +114,6 @@ export interface TermDepositRepository {
     to: TermDepositState
   ): Promise<{ affected: number; record: TermDepositRecord | null }>;
 
-  /**
-   * Set the successor link on a predecessor deposit. Validates that the
-   * successor id exists. Used in M1B for read-side tests only; the full
-   * renewal-link closure workflow is gated out of scope.
-   */
-  setSuccessorLink(predecessorId: number, successorId: number): Promise<void>;
-
   /** Read the linked predecessor, if any. */
   loadPredecessor(id: number): Promise<TermDepositRecord | null>;
 
