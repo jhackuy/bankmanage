@@ -365,13 +365,6 @@ export class D1TermDepositRepository implements TermDepositRepository {
     return { affected: result.meta.changes, record };
   }
 
-  async setSuccessorLink(predecessorId: number, successorId: number): Promise<void> {
-    const sql =
-      "UPDATE term_deposits SET successor_deposit_id = ?, updated_at = datetime('now', 'utc') " +
-      "WHERE id = ?";
-    await this.db.prepare(sql).bind(successorId, predecessorId).run();
-  }
-
   async loadPredecessor(id: number): Promise<TermDepositRecord | null> {
     const row = await this.db
       .prepare(
