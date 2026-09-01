@@ -149,7 +149,9 @@ function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
   const start = parseIsoDateUtc(inputs.startDate);
   const end = parseIsoDateUtc(inputs.maturityDate);
   if (end.getTime() < start.getTime()) {
-    throw new Error(\n      `Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`\n    );
+    throw new Error(
+      `Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`
+    );
   }
 
   const principal = BigInt(inputs.principalMinor);
