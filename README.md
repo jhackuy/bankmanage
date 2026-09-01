@@ -35,7 +35,7 @@ GitHub repository secret 只需要配置推理凭据：
 
 - `MINIMAX_API_KEY`：MiniMax Token Plan 的 `sk-cp` key。
 
-Claude Code 当前走 MiniMax 官方 Anthropic-compatible endpoint，并按 MiniMax 官方 Claude Code 配置使用精确模型 ID `MiniMax-M3[1m]`。由于 Agent 仅加载受信任的 project settings、不会读取 runner 用户配置，工作流会显式注册该 gateway custom model、启用 gateway model discovery，并在 CLI 调用中固定 `--model`。工作流仍把主运行自动压缩阈值限制在约 140k tokens，不把 1M 上下文当作日常预算；`[1m]` 是 MiniMax 官方要求的 Claude Code 路由标识，不代表每次任务实际使用 1M tokens。
+Claude Code 当前走 MiniMax 官方 Anthropic-compatible endpoint，并按 MiniMax 官方 Claude Code 配置使用精确模型 ID `MiniMax-M3[1m]`。由于 Agent 仅加载受信任的 project settings、不会读取 runner 用户配置，project settings 通过 `modelOverrides` 把 Claude Code 已知的 Sonnet 标识映射到该 MiniMax gateway model，CLI 调用固定使用映射源标识。失败时工作流只输出经过字段筛选的 provider 结果，便于审计且不输出凭据。工作流仍把主运行自动压缩阈值限制在约 140k tokens，不把 1M 上下文当作日常预算；`[1m]` 是 MiniMax 官方要求的 Claude Code 路由标识，不代表每次任务实际使用 1M tokens。
 
 自动实现流程把该 secret 只暴露给 Claude 模型调用步骤。Claude 不获得 GitHub 写 Token、Cloudflare、Telegram 或生产/部署凭据；commit/push/PR 由模型运行结束后的确定性步骤完成。
 
