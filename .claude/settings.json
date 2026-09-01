@@ -20,5 +20,8 @@
       "WebSearch",
       "Agent"
     ]
+  },
+  "modelOverrides": {
+    "claude-sonnet-4-6": "MiniMax-M3[1m]"
   }
 }
