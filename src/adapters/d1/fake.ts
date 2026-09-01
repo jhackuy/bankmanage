@@ -129,7 +129,7 @@ class FakeD1Statement implements D1PreparedStatement {
       success: true,
       meta: {
         duration: 0,
-        changes: rows.length,
+        changes: 0,
         last_row_id: null,
         served_by: "fake-d1",
         rows_read: rows.length,
