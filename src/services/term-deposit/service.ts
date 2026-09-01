@@ -192,23 +192,23 @@ export class TermDepositApplicationService {
     if (
       patch.bankQuotedGrossInterestMinor !== undefined &&
       patch.bankQuotedGrossInterestMinor !== null &&
-      !Number.isSafeInteger(patch.bankQuotedGrossInterestMinor)
+      (!Number.isSafeInteger(patch.bankQuotedGrossInterestMinor) || patch.bankQuotedGrossInterestMinor < 0)
     ) {
-      return fail("INVALID_INPUT", "bankQuotedGrossInterestMinor must be an integer or null");
+      return fail("INVALID_INPUT", "bankQuotedGrossInterestMinor must be a non-negative safe integer or null");
     }
     if (
       patch.bankQuotedNetInterestMinor !== undefined &&
       patch.bankQuotedNetInterestMinor !== null &&
-      !Number.isSafeInteger(patch.bankQuotedNetInterestMinor)
+      (!Number.isSafeInteger(patch.bankQuotedNetInterestMinor) || patch.bankQuotedNetInterestMinor < 0)
     ) {
-      return fail("INVALID_INPUT", "bankQuotedNetInterestMinor must be an integer or null");
+      return fail("INVALID_INPUT", "bankQuotedNetInterestMinor must be a non-negative safe integer or null");
     }
     if (
       patch.bankQuotedMaturityAmountMinor !== undefined &&
       patch.bankQuotedMaturityAmountMinor !== null &&
-      !Number.isSafeInteger(patch.bankQuotedMaturityAmountMinor)
+      (!Number.isSafeInteger(patch.bankQuotedMaturityAmountMinor) || patch.bankQuotedMaturityAmountMinor < 0)
     ) {
-      return fail("INVALID_INPUT", "bankQuotedMaturityAmountMinor must be an integer or null");
+      return fail("INVALID_INPUT", "bankQuotedMaturityAmountMinor must be a non-negative safe integer or null");
     }
 
     let updated: TermDepositRecord;
@@ -302,6 +302,16 @@ export class TermDepositApplicationService {
   }
 
   private async validateCreateInput(input: CreateDraftInput): Promise<ServiceResult<true>> {
+    for (const [name, value] of [
+      ["accountId", input.accountId],
+      ["bankId", input.bankId],
+      ["holderMemberId", input.holderMemberId],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        return fail("INVALID_INPUT", `${name} must be a positive safe integer`);
+      }
+    }
+
     // Certificate privacy boundary: exactly four ASCII digits. Longer or
     // shorter values must be rejected here, never trimmed/stored partially.
     const certCheck = validateCertificate(input.certificateLastFour);
@@ -324,6 +334,13 @@ export class TermDepositApplicationService {
     );
     if (!moneyCheck.ok) return moneyCheck;
 
+    const quotedCheck = validateBankQuotedValues(
+      input.bankQuotedGrossInterestMinor,
+      input.bankQuotedNetInterestMinor,
+      input.bankQuotedMaturityAmountMinor
+    );
+    if (!quotedCheck.ok) return quotedCheck;
+
     const datesCheck = validateDates(input.startDate, input.maturityDate);
     if (!datesCheck.ok) return datesCheck;
 
@@ -336,12 +353,15 @@ export class TermDepositApplicationService {
 
     if (
       input.maturitySettlementAccountId !== undefined &&
-      !Number.isSafeInteger(input.maturitySettlementAccountId)
+      (!Number.isSafeInteger(input.maturitySettlementAccountId) || input.maturitySettlementAccountId <= 0)
     ) {
-      return fail("INVALID_INPUT", "maturitySettlementAccountId must be a safe integer");
+      return fail("INVALID_INPUT", "maturitySettlementAccountId must be a positive safe integer");
     }
-    if (input.predecessorDepositId !== undefined && !Number.isSafeInteger(input.predecessorDepositId)) {
-      return fail("INVALID_INPUT", "predecessorDepositId must be a safe integer");
+    if (
+      input.predecessorDepositId !== undefined &&
+      (!Number.isSafeInteger(input.predecessorDepositId) || input.predecessorDepositId <= 0)
+    ) {
+      return fail("INVALID_INPUT", "predecessorDepositId must be a positive safe integer");
     }
     if (input.maturityInstruction !== undefined) {
       const instrCheck = validateMaturityInstruction(input.maturityInstruction);
@@ -385,6 +405,9 @@ export class TermDepositApplicationService {
     const account = await this.repo.loadAccountContext(input.accountId);
     if (account === null) {
       return fail("NOT_FOUND", `account ${input.accountId} not found`);
+    }
+    if (account.active !== 1 || account.archived === 1) {
+      return fail("NOT_FOUND", `account ${input.accountId} is inactive or archived`);
     }
     if (account.accountType !== "TERM_DEPOSIT") {
       return fail(
@@ -455,6 +478,23 @@ function validateInterestMethod(method: InterestMethod): ServiceResult<true> {
 function validateMaturityInstruction(instruction: MaturityInstruction): ServiceResult<true> {
   if (!["SETTLE_TO_ACCOUNT", "RENEW", "PRETERMINATE", "PENDING"].includes(instruction)) {
     return invalid("INVALID_INPUT", `maturityInstruction is invalid: ${String(instruction)}`);
+  }
+  return ok(true);
+}
+
+function validateBankQuotedValues(
+  gross: number | undefined,
+  net: number | undefined,
+  maturity: number | undefined
+): ServiceResult<true> {
+  for (const [name, value] of [
+    ["bankQuotedGrossInterestMinor", gross],
+    ["bankQuotedNetInterestMinor", net],
+    ["bankQuotedMaturityAmountMinor", maturity],
+  ] as const) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+      return invalid("INVALID_INPUT", `${name} must be a non-negative safe integer`);
+    }
   }
   return ok(true);
 }
