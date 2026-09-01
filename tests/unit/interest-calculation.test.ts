@@ -145,6 +145,18 @@ describe("input validation", () => {
     );
   });
 
+  it("rejects unsafe integer money before BigInt conversion", () => {
+    expect(() =>
+      calculateSimpleInterest(makeInputs({ principalMinor: Number.MAX_SAFE_INTEGER + 1 }))
+    ).toThrow(/principalMinor must be an integer/);
+  });
+
+  it("rejects COMPOUND at the direct SIMPLE entry point", () => {
+    expect(() => calculateSimpleInterest(makeInputs({ interestMethod: "COMPOUND" }))).toThrow(
+      /requires SIMPLE/
+    );
+  });
+
   it("rejects negative annual rate", () => {
     expect(() => calculateSimpleInterest(makeInputs({ annualRateScaled: -1 }))).toThrow(
       /annualRateScaled must be >= 0/
