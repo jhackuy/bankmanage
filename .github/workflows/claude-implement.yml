@@ -88,7 +88,7 @@ jobs:
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
-            --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 32 \
+            --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 64 \
             --no-session-persistence --output-format json \
             "Implement exactly .agent-task/issue.md. Follow CLAUDE.md, AGENTS.md, relevant SPEC/ADR sections and existing tests. Do not run commands or deploy. Make the smallest complete implementation and tests. If a financial/security requirement is ambiguous, stop without guessing." \
             > .agent-task/claude-result.json
