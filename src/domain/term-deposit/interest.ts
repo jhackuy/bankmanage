@@ -127,7 +127,7 @@ function roundHalfAway(numerator: bigint, denominator: bigint): bigint {
 }
 
 function validateIntegerField(name: string, value: number): void {
-  if (!Number.isInteger(value)) {
+  if (!Number.isSafeInteger(value)) {
     throw new Error(`${name} must be an integer: ${value}`);
   }
 }
@@ -207,6 +207,9 @@ function computeTaxMinor(grossMinor: bigint, taxRateScaled: number): bigint {
  * maturity date earlier than the start date.
  */
 export function calculateSimpleInterest(inputs: InterestInputs): InterestEstimate {
+  if (inputs.interestMethod !== "SIMPLE") {
+    throw new Error(`calculateSimpleInterest requires SIMPLE, got ${String(inputs.interestMethod)}`);
+  }
   validateInputs(inputs);
 
   // Validate maturity not before start (re-raises inside dayCountBetween).
