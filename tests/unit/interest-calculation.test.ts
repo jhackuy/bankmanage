@@ -31,7 +31,7 @@ function makeInputs(overrides: Partial<InterestInputs> = {}): InterestInputs {
     taxRateScaled: 200_000, // 20%
     feesMinor: 0,
     startDate: "2026-01-01",
-    maturityDate: "2026-04-01", // 90 days inclusive-end
+    maturityDate: "2026-04-01", // 90-day end-exclusive interval
     interestMethod: "SIMPLE",
     dayCountBasis: "ACT_365",
     ...overrides,
