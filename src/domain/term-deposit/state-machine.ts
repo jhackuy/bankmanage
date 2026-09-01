@@ -148,7 +148,10 @@ function validateClosureGate(to: TermDepositState, gate: ClosureGateInput | unde
     case "RENEWED":
       return validateRenewGate(gate);
     case "CANCELLED":
-      // No evidence required for draft cancellation.
+      // No evidence is required, but a mismatched closure gate is a caller error.
+      if (gate !== undefined && gate.kind !== "CANCEL") {
+        return { ok: false, reason: `CANCELLED requires no gate or gate kind CANCEL, got ${gate.kind}` };
+      }
       return { ok: true };
     default:
       return { ok: true };
