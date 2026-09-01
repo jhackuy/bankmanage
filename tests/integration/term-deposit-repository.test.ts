@@ -419,13 +419,7 @@ describe("non-closure state transitions", () => {
     expect(result.record).toBeNull();
   });
 
-  it("closure transitions are not exposed in the repository layer", async () => {
-    // The repository's transitionState takes raw from/to without a gate.
-    // The application service is the only caller and must enforce M1B's
-    // limited transition list. Verify that even calling the repo with a
-    // closure target does NOT violate any schema check; the application
-    // service is responsible for refusing to call it. This test just
-    // documents the repository's surface area.
+  it("rejects closure transitions at the repository boundary with zero mutation", async () => {
     const created = await repo.insertDraft(
       VALID_DRAFT({
         accountId: seeded.accountId,
@@ -437,12 +431,13 @@ describe("non-closure state transitions", () => {
     await repo.transitionState(created.id, "REVIEW_REQUIRED", "ACTIVE");
     await repo.transitionState(created.id, "ACTIVE", "MATURED_ACTION_REQUIRED");
 
-    const result = await repo.transitionState(created.id, "MATURED_ACTION_REQUIRED", "SETTLED_TO_ACCOUNT");
-    // The repository itself doesn't reject closure transitions — that is
-    // the application service's responsibility (closure gates require
-    // evidence/ledger refs). But the row transition itself is atomic.
-    expect(result.affected).toBe(1);
-    expect(result.record?.state).toBe("SETTLED_TO_ACCOUNT");
+    await expect(
+      repo.transitionState(created.id, "MATURED_ACTION_REQUIRED", "SETTLED_TO_ACCOUNT")
+    ).rejects.toThrow(/not available in M1B/);
+
+    const unchanged = await repo.findById(created.id);
+    expect(unchanged?.state).toBe("MATURED_ACTION_REQUIRED");
+    expect(unchanged?.settlementEvidenceRef).toBeNull();
   });
 });
 
