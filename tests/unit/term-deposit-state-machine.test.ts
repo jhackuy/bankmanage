@@ -320,6 +320,19 @@ describe("settle-gate field validation", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("rejects unsafe integer closure IDs", () => {
+    const gate = {
+      ...validSettleGate(),
+      settlementAccountId: Number.MAX_SAFE_INTEGER + 1,
+    };
+    const result = transition({
+      from: "MATURED_ACTION_REQUIRED",
+      to: "SETTLED_TO_ACCOUNT",
+      gate,
+    });
+    expect(result.ok).toBe(false);
+  });
+
   it("rejects negative actualReceivedTotalMinor", () => {
     const gate = { ...validSettleGate(), actualReceivedTotalMinor: -1 };
     const result = transition({
