@@ -102,11 +102,9 @@ npx wrangler deploy --env pilot
 
 ## Milestones
 
-| Milestone | Status      | Description                                            |
-| --------- | ----------- | ------------------------------------------------------ |
-| M0        | Done        | Scaffold, CI, D1 schema, adapters, Mini App shell      |
-| M1        | In progress | Term deposits, interest calculations, state machine    |
-| M2        | Pending     | Household ledger, quick expenses, reconciliation       |
-| M3        | Pending     | Private R2 document upload, OCR adapter/benchmark      |
-| M4        | Pending     | Telegram webhook, initData auth, Bot reminders         |
-| M5        | Pending     | Pilot deployment, smoke tests, security review         |
+- M0 — Done: scaffold, CI, D1 schema, adapters, Mini App shell.
+- M1 — In progress: term deposits, interest calculations, state machine, reminders.
+- M2 — Pending: household ledger, quick expenses, reconciliation.
+- M3 — Pending: private R2 document upload, OCR adapter/benchmark.
+- M4 — Pending: Telegram webhook, initData auth, Bot reminders.
+- M5 — Pending: pilot deployment, smoke tests, security review.
