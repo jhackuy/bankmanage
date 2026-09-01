@@ -16,7 +16,7 @@
 
 主流程：
 
-`SPEC -> GitHub Issue -> Claude Code + MiniMax M3 -> deterministic validation -> PR -> GitHub CI -> independent acceptance -> merge`
+`SPEC -> GitHub Issue -> Claude Code + MiniMax M2.7 -> deterministic validation -> PR -> GitHub CI -> independent acceptance -> merge`
 
 角色：
 
@@ -34,6 +34,8 @@
 GitHub repository secret 只需要配置推理凭据：
 
 - `MINIMAX_API_KEY`：MiniMax Token Plan 的 `sk-cp` key。
+
+Claude Code 当前走 MiniMax 官方 Anthropic-compatible endpoint，并使用官方文档支持的 `MiniMax-M2.7`。MiniMax M3 虽然属于 Token Plan 可用模型，但当前 Anthropic-compatible interface 的官方 supported-model list 不包含 M3，因此本项目不通过 Claude Code 强行路由 M3。
 
 自动实现流程把该 secret 只暴露给 Claude 模型调用步骤。Claude 不获得 GitHub 写 Token、Cloudflare、Telegram 或生产/部署凭据；commit/push/PR 由模型运行结束后的确定性步骤完成。
 
