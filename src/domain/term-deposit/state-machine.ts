@@ -170,7 +170,7 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
       reason: `${expectedKind} closure requires gate kind ${expectedKind}, got ${gate.kind}`,
     };
   }
-  if (!Number.isInteger(gate.settlementAccountId) || gate.settlementAccountId <= 0) {
+  if (!Number.isSafeInteger(gate.settlementAccountId) || gate.settlementAccountId <= 0) {
     return { ok: false, reason: "settlementAccountId must be a positive integer" };
   }
   if (typeof gate.evidenceRef !== "string" || gate.evidenceRef.trim() === "") {
@@ -179,7 +179,7 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
   if (!isIsoDate(gate.actualSettlementDate)) {
     return { ok: false, reason: "actualSettlementDate must be ISO YYYY-MM-DD" };
   }
-  if (!Number.isInteger(gate.actualReceivedTotalMinor) || gate.actualReceivedTotalMinor < 0) {
+  if (!Number.isSafeInteger(gate.actualReceivedTotalMinor) || gate.actualReceivedTotalMinor < 0) {
     return { ok: false, reason: "actualReceivedTotalMinor must be a non-negative integer" };
   }
   for (const [name, value] of [
@@ -187,7 +187,7 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
     ["actualTaxMinor", gate.actualTaxMinor],
     ["actualPenaltyFeesMinor", gate.actualPenaltyFeesMinor],
   ] as const) {
-    if (!Number.isInteger(value) || value < 0) {
+    if (!Number.isSafeInteger(value) || value < 0) {
       return { ok: false, reason: `${name} must be a non-negative integer` };
     }
   }
@@ -210,13 +210,13 @@ function validateRenewGate(gate: ClosureGateInput | undefined): TransitionResult
   if (typeof gate.evidenceRef !== "string" || gate.evidenceRef.trim() === "") {
     return { ok: false, reason: "evidenceRef is required" };
   }
-  if (!Number.isInteger(gate.successorDepositId) || gate.successorDepositId <= 0) {
+  if (!Number.isSafeInteger(gate.successorDepositId) || gate.successorDepositId <= 0) {
     return { ok: false, reason: "successorDepositId must be a positive integer" };
   }
-  if (!Number.isInteger(gate.newPrincipalMinor) || gate.newPrincipalMinor < 0) {
+  if (!Number.isSafeInteger(gate.newPrincipalMinor) || gate.newPrincipalMinor < 0) {
     return { ok: false, reason: "newPrincipalMinor must be a non-negative integer" };
   }
-  if (!Number.isInteger(gate.newRateScaled) || gate.newRateScaled < 0) {
+  if (!Number.isSafeInteger(gate.newRateScaled) || gate.newRateScaled < 0) {
     return { ok: false, reason: "newRateScaled must be a non-negative integer" };
   }
   if (!isIsoDate(gate.newStartDate)) {
@@ -233,7 +233,7 @@ function validateRenewGate(gate: ClosureGateInput | undefined): TransitionResult
   }
   if (
     gate.interestDisposition === "SETTLED_TO_ACCOUNT" &&
-    (!Number.isInteger(gate.interestSettlementAccountId) || (gate.interestSettlementAccountId ?? 0) <= 0)
+    (!Number.isSafeInteger(gate.interestSettlementAccountId) || (gate.interestSettlementAccountId ?? 0) <= 0)
   ) {
     return {
       ok: false,
