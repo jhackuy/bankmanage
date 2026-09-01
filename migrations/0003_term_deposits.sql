@@ -4,7 +4,7 @@
 -- Money policy: all monetary columns are INTEGER minor units
 --   (e.g. centavos for PHP, where minor_unit_scale = 2 in the `currencies` table).
 -- Rate policy: rates are stored as integer × RATE_SCALE (= 1_000_000):
---   annual_rate_scaled = annual_rate * 1_000_000   (e.g. 5% -> 5_000_000)
+--   annual_rate_scaled = annual_rate * 1_000_000   (e.g. 5% -> 50_000)
 --   tax_rate_scaled   = tax_rate   * 1_000_000   (e.g. 20% -> 200_000)
 -- The scale is fixed at 1_000_000 and is documented in `src/domain/term-deposit/types.ts`.
 -- Certificate numbers: only the last four ASCII digits are stored, never the full number.
@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS term_deposits (
   principal_minor                  INTEGER NOT NULL CHECK (principal_minor >= 0),
   start_date                       TEXT    NOT NULL,   -- ISO 'YYYY-MM-DD'
   maturity_date                    TEXT    NOT NULL,   -- ISO 'YYYY-MM-DD'
-  annual_rate_scaled               INTEGER NOT NULL CHECK (annual_rate_scaled >= 0),
-  tax_rate_scaled                  INTEGER NOT NULL DEFAULT 0 CHECK (tax_rate_scaled >= 0),
+  annual_rate_scaled               INTEGER NOT NULL CHECK (annual_rate_scaled BETWEEN 0 AND 10000000),
+  tax_rate_scaled                  INTEGER NOT NULL DEFAULT 0 CHECK (tax_rate_scaled BETWEEN 0 AND 1000000),
   fees_minor                       INTEGER NOT NULL DEFAULT 0 CHECK (fees_minor >= 0),
 
   -- Calculation method
