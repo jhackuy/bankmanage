@@ -1,0 +1,174 @@
+name: Claude Issue Implementer
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: bankmanage-claude-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.body == '/claude-build' &&
+      github.event.comment.user.login == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+
+      - name: Verify MiniMax secret
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          test -n "$MINIMAX_API_KEY" || { echo "MINIMAX_API_KEY is not configured." >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: Prepare bounded task context
+        id: task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          mkdir -p .agent-task
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" > .agent-task/issue.json
+          {
+            echo "# Assigned GitHub Issue #${ISSUE_NUMBER}"
+            echo
+            jq -r '"## " + .title + "\n\n" + (.body // "")' .agent-task/issue.json
+          } > .agent-task/issue.md
+          BRANCH="claude/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+          git checkout -b "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "issue_title=$(jq -r '.title' .agent-task/issue.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Claude Code
+        run: |
+          set -euo pipefail
+          curl -fsSL https://claude.ai/install.sh | bash -s 2.1.237
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+
+      - name: Claude implementation pass
+        env:
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3
+          API_TIMEOUT_MS: "600000"
+        run: |
+          set -euo pipefail
+          claude -p --model MiniMax-M3 --permission-mode acceptEdits \
+            --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
+            --strict-mcp-config --disable-slash-commands --setting-sources project \
+            --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 32 \
+            --no-session-persistence --output-format json \
+            "Implement exactly .agent-task/issue.md. Follow CLAUDE.md, AGENTS.md, relevant SPEC/ADR sections and existing tests. Do not run commands or deploy. Make the smallest complete implementation and tests. If a financial/security requirement is ambiguous, stop without guessing." \
+            > .agent-task/claude-result.json
+          jq '{route:"Claude Code 2.1.237 -> MiniMax M3",usage:(.usage // "UNKNOWN"),num_turns:(.num_turns // "UNKNOWN"),duration_ms:(.duration_ms // "UNKNOWN"),total_cost_usd:(.total_cost_usd // "UNKNOWN")}' \
+            .agent-task/claude-result.json > .agent-task/metrics.json
+          { echo "### Claude metrics"; echo '```json'; cat .agent-task/metrics.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deterministic validation pass 1
+        id: validation1
+        continue-on-error: true
+        run: ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-1.log
+
+      - name: One bounded repair pass
+        if: steps.validation1.outcome == 'failure'
+        env:
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3
+          API_TIMEOUT_MS: "600000"
+        run: |
+          set -euo pipefail
+          claude -p --model MiniMax-M3 --permission-mode acceptEdits \
+            --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
+            --strict-mcp-config --disable-slash-commands --setting-sources project \
+            --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 18 \
+            --no-session-persistence --output-format json \
+            "Repair only failures in .agent-task/validation-1.log for .agent-task/issue.md. Do not broaden scope. Read the failing log and relevant changed files, fix the root cause/tests, then stop. Do not run commands or deploy." \
+            > .agent-task/claude-repair-result.json
+
+      - name: Final deterministic validation
+        if: steps.validation1.outcome == 'failure'
+        run: ./scripts/agent-validate.sh
+
+      - name: Require implementation diff
+        run: |
+          set -euo pipefail
+          rm -rf .agent-task
+          if git diff --quiet; then
+            echo "No repository changes; no PR created." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Commit and push validated change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.task.outputs.branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          git config user.name "bankmanage-claude-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(issue-${ISSUE_NUMBER}): Claude implementation"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --set-upstream origin "$BRANCH"
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Open PR and report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.task.outputs.branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ steps.task.outputs.issue_title }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/pr-body.md <<EOF
+          Closes #${ISSUE_NUMBER}
+
+          ## Agent route
+          - Claude Code 2.1.237 (pinned)
+          - MiniMax M3 through the Anthropic-compatible endpoint
+          - Fresh bounded context; auto memory off; no subagents/MCP/Web/Bash
+          - At most one bounded repair pass
+
+          ## Deterministic validation
+          npm ci, format/check, lint, typecheck, tests, fresh migration check and build all passed before push. GitHub CI remains the independent merge gate.
+
+          Final task status: PASS_PENDING_REVIEW
+          EOF
+          PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" --body-file /tmp/pr-body.md)
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Claude Code + MiniMax completed deterministic validation and opened ${PR_URL}."
+          echo "Created: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"

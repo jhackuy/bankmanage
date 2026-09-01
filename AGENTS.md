@@ -4,23 +4,29 @@ These rules apply to every AI coding agent working in this repository.
 
 ## 1. Source of truth
 
-Read these before implementation:
+Read only what the assigned task needs, in this authority order:
 
 1. `SPEC.md`
-2. relevant `ADR/*`
-3. `.github/copilot-instructions.md`
-4. path-specific `.github/instructions/*.instructions.md`
-5. the assigned Issue and its acceptance criteria
+2. relevant accepted `ADR/*`
+3. `CLAUDE.md` when Claude Code is the assigned implementation harness
+4. matching path-specific `.github/instructions/*.instructions.md`
+5. the assigned GitHub Issue and its acceptance criteria
 
-If they conflict, `SPEC.md` wins for product/business behavior and the newest accepted ADR wins for architecture. Do not silently reinterpret requirements.
+`.github/copilot-instructions.md` and `.github/agents/*` are fallback compatibility files for a task explicitly assigned to Copilot; they are not the primary BankManage implementation contract.
 
-## 2. Work style
+If sources conflict, `SPEC.md` wins for product/business behavior and the newest accepted ADR wins for architecture. Do not silently reinterpret requirements.
 
-- Inspect the current repository state before editing.
+## 2. Work style and context budget
+
+- One implementation Agent owns one Issue/branch/PR at a time.
+- Inspect current code before editing, but do not perform an unbounded repository-wide audit.
+- Use search first, then open the smallest relevant file set. Do not repeatedly reread unchanged large specifications/files.
 - Implement only the assigned Issue; record adjacent improvements instead of expanding scope.
 - Prefer the smallest architecture that satisfies the specification.
 - Do not add new infrastructure/services without an ADR.
 - Do not create parallel duplicate implementations.
+- No subagents by default. A task must not fan out merely to explore or review the same code repeatedly.
+- Start a fresh bounded Agent session for a new Issue instead of carrying a large previous conversation forward.
 - Keep business logic out of UI components, route handlers and tests.
 - Use adapters around Cloudflare-specific persistence/storage/scheduler/Telegram integrations.
 - Do not rewrite accepted product UX based on subjective taste.
@@ -35,7 +41,7 @@ If they conflict, `SPEC.md` wins for product/business behavior and the newest ac
 - Financial writes must be atomic and idempotent.
 - Posted records are not hard-deleted.
 
-Any ambiguity that could alter money, tax, maturity, settlement or balances is a blocker: document it in the PR instead of guessing.
+Any ambiguity that could alter money, tax, maturity, settlement or balances is a blocker: document it instead of guessing.
 
 ## 4. Security and public-repository discipline
 
@@ -49,22 +55,25 @@ Use only synthetic fixtures. Any secret-shaped string in examples must be obviou
 - Do not expose document object keys as unauthenticated public URLs.
 - Unauthorized requests must cause zero mutation.
 - Logs must not contain tokens, complete initData, raw financial documents or sensitive document text.
+- The implementation model gets only the inference credential needed for that model call. It must not receive GitHub write, Cloudflare deployment, Telegram, or production credentials.
+- Git commit/push, PR creation, CI and deployment are deterministic workflow responsibilities, not implementation-model responsibilities.
 
 ## 5. Testing
 
-Every change must add/update tests at the lowest useful level.
+Every behavior change must add/update tests at the lowest useful level.
 
 Minimum before claiming completion:
 
-- lint/typecheck for changed code;
+- format/lint/typecheck for changed code;
 - relevant unit tests;
 - relevant integration tests;
+- fresh migration verification when schema changes;
 - build;
 - targeted browser/API smoke when UI or routes changed.
 
 Tests must exercise production code paths. Do not create a separate simplified implementation just to make tests pass.
 
-Do not mark PASS if required checks are failing, skipped without justification or not run.
+Do not mark PASS if required checks are failing, skipped without justification or not run. In automated Agent work, deterministic workflow steps run the commands and are the authority for pass/fail.
 
 ## 6. UX
 
@@ -89,13 +98,14 @@ Do not add Redis, external databases, Supabase, Firebase, Neon, Kubernetes, queu
 
 ## 8. PR delivery
 
-A Copilot PR must include:
+An implementation PR must include:
 
 - what changed;
 - files/areas changed;
 - exact validation commands and results;
 - acceptance criteria mapping;
 - risks/known limitations;
-- any item not completed.
+- any item not completed;
+- model/provider route and usage metrics only when the tool/provider actually reports them; unknown values remain `UNKNOWN` rather than estimated.
 
-Keep a single Issue/PR coherent. Do not split work into ceremonial micro-PRs unless isolation is needed for safety or reviewability.
+Keep a single Issue/PR coherent. Do not split work into ceremonial micro-PRs unless isolation is needed for safety, context control or reviewability.

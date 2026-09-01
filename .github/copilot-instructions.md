@@ -1,6 +1,6 @@
-# GitHub Copilot instructions — BankManage
+# GitHub Copilot instructions — BankManage fallback
 
-You are the primary implementation agent for BankManage. Follow `SPEC.md` and `AGENTS.md` exactly.
+Copilot is a fallback implementation/review tool for BankManage, not the primary Agent. The primary automated implementation harness is Claude Code with the project `CLAUDE.md` and `AGENTS.md`. If a task is explicitly assigned to Copilot, follow `SPEC.md` and `AGENTS.md` exactly.
 
 ## Repository workflow
 
@@ -46,7 +46,7 @@ Tests and seeds use synthetic values only.
 
 Never print or persist secrets in logs. Do not include complete Telegram initData, raw OCR text from real documents, tokens or document contents in error messages.
 
-No task should require Agent Secrets by default. Deployment credentials belong to GitHub Actions Secrets / Cloudflare Secrets and downstream deployment jobs, not the Copilot agent runtime.
+No implementation task should require deployment secrets by default. Deployment credentials belong to GitHub Actions deployment jobs / Cloudflare Secrets, not an implementation-agent runtime.
 
 ## UI
 
@@ -56,6 +56,6 @@ Do not add decorative complexity that slows the app. Owner micro-celebrations mu
 
 ## Verification and PR report
 
-Before claiming the task is complete, run all checks relevant to the final state. The PR description must list exact commands and pass/fail counts/results. Explicitly disclose skipped checks, limitations or blockers.
+Before claiming the task is complete, all checks relevant to the final state must be run by the surrounding workflow/reviewer. The PR description must list exact commands and pass/fail results. Explicitly disclose skipped checks, limitations or blockers.
 
 A failing or unrun required check is not PASS.
