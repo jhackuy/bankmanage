@@ -380,8 +380,10 @@ export class D1TermDepositRepository implements TermDepositRepository {
     const row = await this.db
       .prepare(
         `SELECT t2.* FROM term_deposits t1
-         INNER JOIN term_deposits t2 ON t1.successor_deposit_id = t2.id
-         WHERE t1.id = ?`
+         INNER JOIN term_deposits t2 ON t2.predecessor_deposit_id = t1.id
+         WHERE t1.id = ?
+         ORDER BY t2.id ASC
+         LIMIT 1`
       )
       .bind(id)
       .first<TermDepositRow>();
