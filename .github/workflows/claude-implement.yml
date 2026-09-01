@@ -106,7 +106,9 @@ jobs:
       - name: Deterministic validation pass 1
         id: validation1
         continue-on-error: true
-        run: ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-1.log
+        run: |
+          set -o pipefail
+          ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-1.log
 
       - name: One bounded repair pass
         if: steps.validation1.outcome == 'failure'
@@ -149,7 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .agent-task
-          if git diff --quiet; then
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "No repository changes; no PR created." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
