@@ -139,11 +139,7 @@ export class TermDepositApplicationService {
     ) {
       return fail("INVALID_INPUT", "productName must be a non-empty string");
     }
-    if (
-      patch.nickname !== undefined &&
-      patch.nickname !== null &&
-      typeof patch.nickname !== "string"
-    ) {
+    if (patch.nickname !== undefined && patch.nickname !== null && typeof patch.nickname !== "string") {
       return fail("INVALID_INPUT", "nickname must be a string or null");
     }
     if (patch.certificateLastFour !== undefined) {
@@ -163,13 +159,9 @@ export class TermDepositApplicationService {
     if (
       patch.maturitySettlementAccountId !== undefined &&
       patch.maturitySettlementAccountId !== null &&
-      (!Number.isSafeInteger(patch.maturitySettlementAccountId) ||
-        patch.maturitySettlementAccountId <= 0)
+      (!Number.isSafeInteger(patch.maturitySettlementAccountId) || patch.maturitySettlementAccountId <= 0)
     ) {
-      return fail(
-        "INVALID_INPUT",
-        "maturitySettlementAccountId must be a positive safe integer or null"
-      );
+      return fail("INVALID_INPUT", "maturitySettlementAccountId must be a positive safe integer or null");
     }
     if (
       patch.sourceEvidenceRef !== undefined &&
@@ -226,6 +218,9 @@ export class TermDepositApplicationService {
     const existing = await this.repo.findById(id);
     if (existing === null) {
       return fail("DEPOSIT_NOT_FOUND", `term deposit ${id} not found`);
+    }
+    if (!BANK_QUOTED_STATES.includes(existing.state)) {
+      return fail("ILLEGAL_TRANSITION", `bank-quoted facts cannot be changed in state ${existing.state}`);
     }
     if (
       patch.bankQuotedGrossInterestMinor !== undefined &&
