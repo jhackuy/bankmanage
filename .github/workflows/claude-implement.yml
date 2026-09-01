@@ -88,16 +88,22 @@ jobs:
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
-            --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 64 \
+            --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 96 \
             --no-session-persistence --output-format json \
             "Implement exactly .agent-task/issue.md. Follow CLAUDE.md, AGENTS.md, relevant SPEC/ADR sections and existing tests. Do not run commands or deploy. Make the smallest complete implementation and tests. If a financial/security requirement is ambiguous, stop without guessing." \
             > .agent-task/claude-result.json
           CLAUDE_STATUS=$?
           set -e
           if (( CLAUDE_STATUS != 0 )); then
-            echo "Claude implementation failed; sanitized result:" >&2
+            echo "Claude implementation returned non-zero; sanitized result:" >&2
             jq '{is_error,subtype,result,errors}' .agent-task/claude-result.json >&2 || true
-            exit "$CLAUDE_STATUS"
+            SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-result.json 2>/dev/null || true)
+            REPO_CHANGES=$(git status --porcelain --untracked-files=all | grep -vE '^\\?\\? \\.agent-task/' || true)
+            if [[ "$SUBTYPE" == "error_max_turns" && -n "$REPO_CHANGES" ]]; then
+              echo "Claude reached its turn bound with repository changes; continuing to deterministic validation." >> "$GITHUB_STEP_SUMMARY"
+            else
+              exit "$CLAUDE_STATUS"
+            fi
           fi
           jq '{route:"Claude Code 2.1.237 -> MiniMax M3[1m]",usage:(.usage // "UNKNOWN"),num_turns:(.num_turns // "UNKNOWN"),duration_ms:(.duration_ms // "UNKNOWN"),total_cost_usd:(.total_cost_usd // "UNKNOWN")}' \
             .agent-task/claude-result.json > .agent-task/metrics.json
