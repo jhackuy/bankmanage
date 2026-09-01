@@ -205,4 +205,227 @@ describe("D1 migrations", () => {
       );
     }).toThrow();
   });
+
+  // ── Migration 0003: term_deposits (M1A) ───────────────────────────────────
+
+  /** Insert the minimum set of parents needed before term_deposits. */
+  function seedDepositParents(): {
+    memberId: number;
+    bankId: number;
+    accountId: number;
+    currency: string;
+  } {
+    db.prepare("INSERT INTO currencies (code, name, minor_unit_scale) VALUES ('XYZ', 'Test', 2)").run();
+    db.prepare("INSERT INTO banks (slug, name, is_system) VALUES ('test-bank', 'Test Bank', 0)").run();
+    const member = db
+      .prepare("INSERT INTO household_members (role, display_name) VALUES ('OWNER', 'Test Owner')")
+      .run();
+    const bank = db.prepare("SELECT id FROM banks WHERE slug = 'test-bank'").get() as { id: number };
+    const account = db
+      .prepare(
+        "INSERT INTO accounts (member_id, bank_id, currency_code, account_type, nickname) VALUES (?, ?, ?, 'TERM_DEPOSIT', 'Test TD')"
+      )
+      .run(member.lastInsertRowid, bank.id, "XYZ");
+    return {
+      memberId: Number(member.lastInsertRowid),
+      bankId: bank.id,
+      accountId: Number(account.lastInsertRowid),
+      currency: "XYZ",
+    };
+  }
+
+  it("creates term_deposits table", () => {
+    applyMigrations(db);
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='term_deposits'")
+      .get();
+    expect(row).toBeDefined();
+  });
+
+  it("records migration metadata for version 3", () => {
+    applyMigrations(db);
+    const row = db.prepare("SELECT * FROM migration_metadata WHERE version = 3").get() as
+      | { name: string }
+      | undefined;
+    expect(row).toBeDefined();
+    expect(row?.name).toBe("0003_term_deposits");
+  });
+
+  it("term_deposits state column defaults to DRAFT", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const r = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const row = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(r.lastInsertRowid) as {
+      state: string;
+    };
+    expect(row.state).toBe("DRAFT");
+  });
+
+  it("term_deposits state CHECK constraint enforces the lifecycle enum", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis, state)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365', 'NOT_A_STATE')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits interest_method CHECK constraint enforces SIMPLE/COMPOUND", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'WEEKLY', 'ACT_365')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits day_count_basis CHECK constraint enforces ACT_365/ACT_360/ACT_ACT", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_364')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits certificate_last_four rejects non-4-character input", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '123', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits certificate_last_four rejects non-digit characters", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '12A4', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits rejects negative principal", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', -1, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits rejects maturity_date earlier than start_date", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-04-01', '2026-01-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      ).run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    }).toThrow();
+  });
+
+  it("term_deposits has indexes for account, state, maturity_date, holder_member_id", () => {
+    applyMigrations(db);
+    const expected = [
+      "idx_term_deposits_account_id",
+      "idx_term_deposits_state",
+      "idx_term_deposits_maturity_date",
+      "idx_term_deposits_holder_member_id",
+    ];
+    for (const idx of expected) {
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get(idx);
+      expect(row, `expected index ${idx} to exist`).toBeDefined();
+    }
+  });
+
+  it("term_deposits predecessor/successor self-link CHECK constraint prevents self-loop", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const r = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const id = Number(r.lastInsertRowid);
+    expect(() => {
+      db.prepare("UPDATE term_deposits SET successor_deposit_id = ? WHERE id = ?").run(id, id);
+    }).toThrow();
+    expect(() => {
+      db.prepare("UPDATE term_deposits SET predecessor_deposit_id = ? WHERE id = ?").run(id, id);
+    }).toThrow();
+  });
 });

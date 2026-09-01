@@ -48,6 +48,7 @@ try {
     "banks",
     "accounts",
     "categories",
+    "term_deposits",
   ];
 
   for (const table of expectedTables) {
