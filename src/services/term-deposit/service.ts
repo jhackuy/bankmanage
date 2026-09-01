@@ -24,6 +24,8 @@
 
 import {
   calculateEstimate,
+  MAX_ANNUAL_RATE_SCALED,
+  MAX_TAX_RATE_SCALED,
   transition as validateTransition,
   type ClosureGateInput,
   type InterestEstimate,
@@ -44,11 +46,6 @@ import {
   type TermDepositRecord,
   type TermDepositWithEstimate,
 } from "./types.js";
-
-// Upper-bound guards for scaled rates; mirror the M1A domain constants so
-// the application service rejects out-of-range inputs before INSERT.
-const MAX_ANNUAL_RATE_SCALED = 10_000_000; // 1000% per year.
-const MAX_TAX_RATE_SCALED = 1_000_000; // 100% tax.
 
 // States in which editable facts may be patched. These match SPEC §4.2 —
 // once a deposit is ACTIVE the financial terms are locked in by the bank.
@@ -114,8 +111,8 @@ export class TermDepositApplicationService {
     let record: TermDepositRecord;
     try {
       record = await this.repo.insertDraft(input);
-    } catch (err) {
-      return fail("INTERNAL", `insertDraft failed: ${err instanceof Error ? err.message : String(err)}`);
+    } catch {
+      return fail("INTERNAL", "Unable to create term deposit");
     }
     return ok({ record, estimate: this.computeEstimate(record) });
   }
