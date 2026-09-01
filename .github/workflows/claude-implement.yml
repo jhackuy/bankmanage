@@ -84,13 +84,21 @@ jobs:
           ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
-          claude -p --model "MiniMax-M3[1m]" --permission-mode acceptEdits \
+          set +e
+          claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
             --exclude-dynamic-system-prompt-sections --autocompact 140k --max-turns 32 \
             --no-session-persistence --output-format json \
             "Implement exactly .agent-task/issue.md. Follow CLAUDE.md, AGENTS.md, relevant SPEC/ADR sections and existing tests. Do not run commands or deploy. Make the smallest complete implementation and tests. If a financial/security requirement is ambiguous, stop without guessing." \
             > .agent-task/claude-result.json
+          CLAUDE_STATUS=$?
+          set -e
+          if (( CLAUDE_STATUS != 0 )); then
+            echo "Claude implementation failed; sanitized result:" >&2
+            jq '{is_error,subtype,result,errors}' .agent-task/claude-result.json >&2 || true
+            exit "$CLAUDE_STATUS"
+          fi
           jq '{route:"Claude Code 2.1.237 -> MiniMax M3[1m]",usage:(.usage // "UNKNOWN"),num_turns:(.num_turns // "UNKNOWN"),duration_ms:(.duration_ms // "UNKNOWN"),total_cost_usd:(.total_cost_usd // "UNKNOWN")}' \
             .agent-task/claude-result.json > .agent-task/metrics.json
           { echo "### Claude metrics"; echo '```json'; cat .agent-task/metrics.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -117,13 +125,21 @@ jobs:
           ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
-          claude -p --model "MiniMax-M3[1m]" --permission-mode acceptEdits \
+          set +e
+          claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
             --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 18 \
             --no-session-persistence --output-format json \
             "Repair only failures in .agent-task/validation-1.log for .agent-task/issue.md. Do not broaden scope. Read the failing log and relevant changed files, fix the root cause/tests, then stop. Do not run commands or deploy." \
             > .agent-task/claude-repair-result.json
+          CLAUDE_STATUS=$?
+          set -e
+          if (( CLAUDE_STATUS != 0 )); then
+            echo "Claude repair failed; sanitized result:" >&2
+            jq '{is_error,subtype,result,errors}' .agent-task/claude-repair-result.json >&2 || true
+            exit "$CLAUDE_STATUS"
+          fi
 
       - name: Final deterministic validation
         if: steps.validation1.outcome == 'failure'
