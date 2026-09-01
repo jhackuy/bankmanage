@@ -30,6 +30,11 @@ export interface SettleToAccountGateInput {
   /** ISO 'YYYY-MM-DD'. */
   readonly actualSettlementDate: string;
   readonly actualReceivedTotalMinor: number;
+  readonly actualGrossInterestMinor: number;
+  readonly actualTaxMinor: number;
+  readonly actualPenaltyFeesMinor: number;
+  /** Opaque reference to a balanced ledger batch created by the ledger service. */
+  readonly balancedLedgerRef: string;
 }
 
 /** Required evidence/ledger inputs for a RENEWED closure. */
@@ -42,6 +47,8 @@ export interface RenewGateInput {
   readonly newRateScaled: number;
   readonly newStartDate: string;
   readonly newMaturityDate: string;
+  readonly interestDisposition: "CAPITALIZED" | "SETTLED_TO_ACCOUNT";
+  readonly interestSettlementAccountId?: number;
 }
 
 /** Required evidence/ledger inputs for a PRETERMINATED closure. */
@@ -51,6 +58,11 @@ export interface PreterminateGateInput {
   readonly evidenceRef: string;
   readonly actualSettlementDate: string;
   readonly actualReceivedTotalMinor: number;
+  readonly actualGrossInterestMinor: number;
+  readonly actualTaxMinor: number;
+  readonly actualPenaltyFeesMinor: number;
+  /** Opaque reference to a balanced ledger batch created by the ledger service. */
+  readonly balancedLedgerRef: string;
 }
 
 /** CANCELLED is a draft outcome; no evidence required. */
@@ -167,6 +179,18 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
   if (!Number.isInteger(gate.actualReceivedTotalMinor) || gate.actualReceivedTotalMinor < 0) {
     return { ok: false, reason: "actualReceivedTotalMinor must be a non-negative integer" };
   }
+  for (const [name, value] of [
+    ["actualGrossInterestMinor", gate.actualGrossInterestMinor],
+    ["actualTaxMinor", gate.actualTaxMinor],
+    ["actualPenaltyFeesMinor", gate.actualPenaltyFeesMinor],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 0) {
+      return { ok: false, reason: `${name} must be a non-negative integer` };
+    }
+  }
+  if (typeof gate.balancedLedgerRef !== "string" || gate.balancedLedgerRef.trim() === "") {
+    return { ok: false, reason: "balancedLedgerRef is required" };
+  }
   return { ok: true };
 }
 
@@ -198,9 +222,39 @@ function validateRenewGate(gate: ClosureGateInput | undefined): TransitionResult
   if (!isIsoDate(gate.newMaturityDate)) {
     return { ok: false, reason: "newMaturityDate must be ISO YYYY-MM-DD" };
   }
+  if (gate.newMaturityDate < gate.newStartDate) {
+    return { ok: false, reason: "newMaturityDate must not be before newStartDate" };
+  }
+  if (
+    gate.interestDisposition !== "CAPITALIZED" &&
+    gate.interestDisposition !== "SETTLED_TO_ACCOUNT"
+  ) {
+    return { ok: false, reason: "interestDisposition is invalid" };
+  }
+  if (
+    gate.interestDisposition === "SETTLED_TO_ACCOUNT" &&
+    (!Number.isInteger(gate.interestSettlementAccountId) ||
+      (gate.interestSettlementAccountId ?? 0) <= 0)
+  ) {
+    return {
+      ok: false,
+      reason: "interestSettlementAccountId is required when interest is settled",
+    };
+  }
   return { ok: true };
 }
 
 function isIsoDate(s: string): boolean {
-  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return false;
+  }
+  const year = Number(s.slice(0, 4));
+  const month = Number(s.slice(5, 7));
+  const day = Number(s.slice(8, 10));
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  );
 }
