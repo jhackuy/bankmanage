@@ -92,10 +92,7 @@ const ALLOWED: ReadonlyMap<TermDepositState, ReadonlySet<TermDepositState>> = ne
   ["DRAFT", new Set<TermDepositState>(["REVIEW_REQUIRED", "CANCELLED"])],
   ["REVIEW_REQUIRED", new Set<TermDepositState>(["ACTIVE"])],
   ["ACTIVE", new Set<TermDepositState>(["MATURED_ACTION_REQUIRED"])],
-  [
-    "MATURED_ACTION_REQUIRED",
-    new Set<TermDepositState>(["SETTLED_TO_ACCOUNT", "RENEWED", "PRETERMINATED"]),
-  ],
+  ["MATURED_ACTION_REQUIRED", new Set<TermDepositState>(["SETTLED_TO_ACCOUNT", "RENEWED", "PRETERMINATED"])],
 ]);
 
 /** True if the transition `from -> to` is permitted by the lifecycle graph. */
@@ -160,10 +157,7 @@ function validateClosureGate(to: TermDepositState, gate: ClosureGateInput | unde
 
 type SettleKind = "SETTLE_TO_ACCOUNT" | "PRETERMINATE";
 
-function validateSettleGate(
-  gate: ClosureGateInput | undefined,
-  expectedKind: SettleKind
-): TransitionResult {
+function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: SettleKind): TransitionResult {
   if (gate === undefined) {
     return { ok: false, reason: `${expectedKind} closure requires a gate input` };
   }
@@ -231,16 +225,12 @@ function validateRenewGate(gate: ClosureGateInput | undefined): TransitionResult
   if (gate.newMaturityDate < gate.newStartDate) {
     return { ok: false, reason: "newMaturityDate must not be before newStartDate" };
   }
-  if (
-    gate.interestDisposition !== "CAPITALIZED" &&
-    gate.interestDisposition !== "SETTLED_TO_ACCOUNT"
-  ) {
+  if (gate.interestDisposition !== "CAPITALIZED" && gate.interestDisposition !== "SETTLED_TO_ACCOUNT") {
     return { ok: false, reason: "interestDisposition is invalid" };
   }
   if (
     gate.interestDisposition === "SETTLED_TO_ACCOUNT" &&
-    (!Number.isInteger(gate.interestSettlementAccountId) ||
-      (gate.interestSettlementAccountId ?? 0) <= 0)
+    (!Number.isInteger(gate.interestSettlementAccountId) || (gate.interestSettlementAccountId ?? 0) <= 0)
   ) {
     return {
       ok: false,
@@ -259,8 +249,6 @@ function isIsoDate(s: string): boolean {
   const day = Number(s.slice(8, 10));
   const parsed = new Date(Date.UTC(year, month - 1, day));
   return (
-    parsed.getUTCFullYear() === year &&
-    parsed.getUTCMonth() === month - 1 &&
-    parsed.getUTCDate() === day
+    parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day
   );
 }

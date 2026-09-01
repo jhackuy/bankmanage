@@ -65,11 +65,7 @@ function parseIsoDateUtc(s: string): Date {
   const month = Number(s.slice(5, 7));
   const day = Number(s.slice(8, 10));
   const parsed = new Date(Date.UTC(year, month - 1, day));
-  if (
-    parsed.getUTCFullYear() !== year ||
-    parsed.getUTCMonth() !== month - 1 ||
-    parsed.getUTCDate() !== day
-  ) {
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
     throw new Error(`Invalid calendar date: ${s}`);
   }
   return parsed;
@@ -149,9 +145,7 @@ function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
   const start = parseIsoDateUtc(inputs.startDate);
   const end = parseIsoDateUtc(inputs.maturityDate);
   if (end.getTime() < start.getTime()) {
-    throw new Error(
-      `Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`
-    );
+    throw new Error(`Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`);
   }
 
   const principal = BigInt(inputs.principalMinor);
@@ -174,9 +168,7 @@ function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
     const year = cursor.getUTCFullYear();
     const nextYear = new Date(Date.UTC(year + 1, 0, 1));
     const segmentEnd = nextYear.getTime() < end.getTime() ? nextYear : end;
-    const segmentDays = BigInt(
-      Math.round((segmentEnd.getTime() - cursor.getTime()) / MS_PER_DAY)
-    );
+    const segmentDays = BigInt(Math.round((segmentEnd.getTime() - cursor.getTime()) / MS_PER_DAY));
     if (isLeapYear(year)) {
       daysIn366Years += segmentDays;
     } else {
