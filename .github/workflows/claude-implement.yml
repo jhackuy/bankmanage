@@ -74,10 +74,11 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
           API_TIMEOUT_MS: "3000000"
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-          ANTHROPIC_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M2.7
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
           claude -p --permission-mode acceptEdits \
@@ -87,7 +88,7 @@ jobs:
             --no-session-persistence --output-format json \
             "Implement exactly .agent-task/issue.md. Follow CLAUDE.md, AGENTS.md, relevant SPEC/ADR sections and existing tests. Do not run commands or deploy. Make the smallest complete implementation and tests. If a financial/security requirement is ambiguous, stop without guessing." \
             > .agent-task/claude-result.json
-          jq '{route:"Claude Code 2.1.237 -> MiniMax M2.7",usage:(.usage // "UNKNOWN"),num_turns:(.num_turns // "UNKNOWN"),duration_ms:(.duration_ms // "UNKNOWN"),total_cost_usd:(.total_cost_usd // "UNKNOWN")}' \
+          jq '{route:"Claude Code 2.1.237 -> MiniMax M3[1m]",usage:(.usage // "UNKNOWN"),num_turns:(.num_turns // "UNKNOWN"),duration_ms:(.duration_ms // "UNKNOWN"),total_cost_usd:(.total_cost_usd // "UNKNOWN")}' \
             .agent-task/claude-result.json > .agent-task/metrics.json
           { echo "### Claude metrics"; echo '```json'; cat .agent-task/metrics.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -103,10 +104,11 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
           API_TIMEOUT_MS: "3000000"
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-          ANTHROPIC_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M2.7
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M2.7
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
           claude -p --permission-mode acceptEdits \
@@ -158,7 +160,7 @@ jobs:
 
           ## Agent route
           - Claude Code 2.1.237 (pinned)
-          - MiniMax M2.7 through the officially supported Anthropic-compatible endpoint
+          - MiniMax M3[1m] through the officially supported Anthropic-compatible endpoint
           - Fresh bounded context; auto memory off; no subagents/MCP/Web/Bash
           - At most one bounded repair pass
 
