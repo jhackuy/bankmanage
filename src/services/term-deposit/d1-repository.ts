@@ -356,13 +356,12 @@ export class D1TermDepositRepository implements TermDepositRepository {
     }
     const sql =
       "UPDATE term_deposits SET state = ?, updated_at = datetime('now', 'utc') " +
-      "WHERE id = ? AND state = ?";
-    const result = await this.db.prepare(sql).bind(to, id, expectedFrom).run();
-    if (result.meta.changes === 0) {
+      "WHERE id = ? AND state = ? RETURNING *";
+    const row = await this.db.prepare(sql).bind(to, id, expectedFrom).first<TermDepositRow>();
+    if (row === null) {
       return { affected: 0, record: null };
     }
-    const record = await this.findById(id);
-    return { affected: result.meta.changes, record };
+    return { affected: 1, record: rowToRecord(row) };
   }
 
   async loadPredecessor(id: number): Promise<TermDepositRecord | null> {
