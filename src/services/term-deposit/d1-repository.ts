@@ -93,6 +93,13 @@ function rowToRecord(row: TermDepositRow): TermDepositRecord {
 
 // ── D1 Repository ───────────────────────────────────────────────────────────
 
+const M1B_TRANSITION_EDGES = new Set([
+  "DRAFT->REVIEW_REQUIRED",
+  "REVIEW_REQUIRED->ACTIVE",
+  "ACTIVE->MATURED_ACTION_REQUIRED",
+  "DRAFT->CANCELLED",
+]);
+
 export class D1TermDepositRepository implements TermDepositRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -343,6 +350,10 @@ export class D1TermDepositRepository implements TermDepositRepository {
     expectedFrom: TermDepositState,
     to: TermDepositState
   ): Promise<{ affected: number; record: TermDepositRecord | null }> {
+    const edge = `${expectedFrom}->${to}`;
+    if (!M1B_TRANSITION_EDGES.has(edge)) {
+      throw new Error(`transitionState: edge ${edge} is not available in M1B`);
+    }
     const sql =
       "UPDATE term_deposits SET state = ?, updated_at = datetime('now', 'utc') " +
       "WHERE id = ? AND state = ?";
