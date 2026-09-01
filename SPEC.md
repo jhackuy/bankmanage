@@ -1,8 +1,8 @@
 # BankManage — Product & Acceptance Specification
 
-Version: v1.2-cloudflare-pilot  
+Version: v1.3-claude-minimax-runtime  
 Status: AUTHORITATIVE  
-Date: 2026-08-31
+Date: 2026-09-01
 
 ## 0. Authority and change rule
 
@@ -364,20 +364,30 @@ Production/pilot secrets must come from GitHub Actions Secrets and/or Cloudflare
 
 ## 14. Development governance
 
-Development is GitHub-native and Copilot-first:
+Development is GitHub-native and Claude-Code/MiniMax-first:
 
-`SPEC -> Issue -> Copilot cloud agent -> Draft PR -> CI -> Copilot code review -> acceptance -> merge`
+`SPEC -> Issue -> Claude Code + MiniMax -> validated branch -> PR -> GitHub CI -> independent acceptance -> merge`
 
 Rules:
 
-- one implementation Agent owns one Issue/PR at a time;
+- GitHub Issues/PRs and repository source files are the durable source of truth; Agent chat history is not.
+- one implementation Agent owns one Issue/branch/PR at a time;
 - no parallel Agents modifying overlapping product code;
-- do not create ceremonial gates or dozens of micro Issues;
+- each new Issue starts a fresh bounded Agent session rather than resuming a large prior context;
+- Agent discovery is targeted: search first, then read only relevant specification sections and files; no default whole-repository audit;
+- subagents, Web/MCP exploration and shell access are disabled in the default implementation run;
+- auto memory is disabled for automated implementation runs;
+- Claude Code receives only the MiniMax inference credential during model invocation. It must not receive GitHub write, Cloudflare deployment, Telegram, or production credentials;
+- deterministic workflow steps, not the model, run formatting/tests/migrations/build, commit/push and PR creation;
+- at most one bounded fresh repair pass is allowed after deterministic validation fails; repeated failures stop as a blocker instead of looping and burning tokens;
 - CI stays useful and small: lint/typecheck, unit/integration tests, migration/schema verification, build, targeted browser smoke;
 - implementation tests call production code paths; no duplicated "test implementation";
 - financial rules and state machines live in services/domain code, not UI templates/components;
 - a PR cannot claim PASS when tests are skipped/failing or acceptance evidence is absent;
-- Copilot Agent must not be given deployment/Telegram secrets unless a task strictly requires them; default is zero Agent secrets.
+- model/provider usage values are recorded only when reported by the provider/CLI; unknown usage stays `UNKNOWN` and is never estimated;
+- do not create ceremonial gates or dozens of micro Issues. Split only when a slice is genuinely too broad for safe implementation/review/context control.
+
+Primary automation is the owner-only `/claude-build` Issue command. Copilot remains an optional fallback tool but Copilot quota/review is not a BankManage merge gate.
 
 ## 15. First development milestones
 

@@ -1,0 +1,24 @@
+{
+  "autoMemoryEnabled": false,
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./.dev.vars)",
+      "Read(./.wrangler/**)",
+      "Read(./uploads/**)",
+      "Read(./documents/**)",
+      "Read(./receipts/**)",
+      "Read(./screenshots/**)",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "Agent"
+    ]
+  }
+}
