@@ -727,6 +727,30 @@ describe("bank-quoted facts do not alter the system estimate", () => {
     expect(fetched.value.record.bankQuotedGrossInterestMinor).toBe(9_999_999);
     expect(fetched.value.record.bankQuotedNetInterestMinor).toBe(8_888_888);
   });
+
+  it("reports an illegal transition outside bank-quoted editable states", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await service.cancelDraft(created.value.record.id);
+    const result = await service.updateBankQuotedFacts(created.value.record.id, {
+      bankQuotedGrossInterestMinor: 1,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("ILLEGAL_TRANSITION");
+
+    const unchanged = await service.getDeposit(created.value.record.id);
+    expect(unchanged.ok).toBe(true);
+    if (!unchanged.ok || unchanged.value === null) return;
+    expect(unchanged.value.record.bankQuotedGrossInterestMinor).toBeNull();
+  });
 });
 
 // ── editable-facts update ──────────────────────────────────────────────────
