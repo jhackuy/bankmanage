@@ -64,7 +64,15 @@ function parseIsoDateUtc(s: string): Date {
   const year = Number(s.slice(0, 4));
   const month = Number(s.slice(5, 7));
   const day = Number(s.slice(8, 10));
-  return new Date(Date.UTC(year, month - 1, day));
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    throw new Error(`Invalid calendar date: ${s}`);
+  }
+  return parsed;
 }
 
 function isLeapYear(year: number): boolean {
@@ -72,12 +80,9 @@ function isLeapYear(year: number): boolean {
 }
 
 /**
- * ACT_ACT explicit contract used by this domain:
- *   the divisor is the number of days in the calendar year of `startDate`
- *   (366 in a leap year, 365 otherwise).
- * This is the convention used by the regression vectors in SPEC §4.1.
- * Multi-year splits are not handled in M1A; deposits that cross a leap
- * boundary are an explicit limitation documented in the PR.
+ * ACT_ACT reporting helper: returns the divisor for the start year.
+ * Financial calculation does not rely on this single divisor for cross-year
+ * deposits; computeSimpleGrossMinor splits those intervals by calendar year.
  */
 export function dayCountBetween(
   startDate: string,
@@ -141,19 +146,49 @@ function validateIntegerField(name: string, value: number): void {
  * in BigInt so no binary floating-point path is taken.
  */
 function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
-  const dc = dayCountBetween(inputs.startDate, inputs.maturityDate, inputs.dayCountBasis);
+  const start = parseIsoDateUtc(inputs.startDate);
+  const end = parseIsoDateUtc(inputs.maturityDate);
+  if (end.getTime() < start.getTime()) {
+    throw new Error(`Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`);
+  }
+
   const principal = BigInt(inputs.principalMinor);
   const rate = BigInt(inputs.annualRateScaled);
-  const days = BigInt(dc.days);
-  const basis = BigInt(dc.basisDays);
   const scale = BigInt(RATE_SCALE);
-  const denominator = scale * basis;
-  if (denominator === 0n) {
-    // Defensive: RATE_SCALE > 0 and basis > 0 by construction; this is unreachable.
-    throw new Error("Denominator is zero");
+
+  if (inputs.dayCountBasis !== "ACT_ACT") {
+    const dc = dayCountBetween(inputs.startDate, inputs.maturityDate, inputs.dayCountBasis);
+    return roundHalfAway(principal * rate * BigInt(dc.days), scale * BigInt(dc.basisDays));
   }
-  const numerator = principal * rate * days;
-  return roundHalfAway(numerator, denominator);
+
+  // ISDA-style ACT/ACT: split the actual interval at calendar-year boundaries,
+  // then sum each segment over that year's actual 365/366-day denominator.
+  // 365*366 is a common denominator, so the financial path remains integer-only
+  // and the final result is rounded exactly once.
+  let cursor = start;
+  let daysIn365Years = 0n;
+  let daysIn366Years = 0n;
+  while (cursor.getTime() < end.getTime()) {
+    const year = cursor.getUTCFullYear();
+    const nextYear = new Date(Date.UTC(year + 1, 0, 1));
+    const segmentEnd = nextYear.getTime() < end.getTime() ? nextYear : end;
+    const segmentDays = BigInt(
+      Math.round((segmentEnd.getTime() - cursor.getTime()) / MS_PER_DAY)
+    );
+    if (isLeapYear(year)) {
+      daysIn366Years += segmentDays;
+    } else {
+      daysIn365Years += segmentDays;
+    }
+    cursor = segmentEnd;
+  }
+
+  const commonYearDenominator = 365n * 366n;
+  const weightedDays = daysIn365Years * 366n + daysIn366Years * 365n;
+  return roundHalfAway(
+    principal * rate * weightedDays,
+    scale * commonYearDenominator
+  );
 }
 
 /**
