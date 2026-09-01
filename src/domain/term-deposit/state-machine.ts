@@ -92,7 +92,10 @@ const ALLOWED: ReadonlyMap<TermDepositState, ReadonlySet<TermDepositState>> = ne
   ["DRAFT", new Set<TermDepositState>(["REVIEW_REQUIRED", "CANCELLED"])],
   ["REVIEW_REQUIRED", new Set<TermDepositState>(["ACTIVE"])],
   ["ACTIVE", new Set<TermDepositState>(["MATURED_ACTION_REQUIRED"])],
-  ["MATURED_ACTION_REQUIRED", new Set<TermDepositState>(["SETTLED_TO_ACCOUNT", "RENEWED", "PRETERMINATED"])],
+  [
+    "MATURED_ACTION_REQUIRED",
+    new Set<TermDepositState>(["SETTLED_TO_ACCOUNT", "RENEWED", "PRETERMINATED"]),
+  ],
 ]);
 
 /** True if the transition `from -> to` is permitted by the lifecycle graph. */
@@ -139,7 +142,10 @@ export function transition(req: TransitionRequest): TransitionResult {
 
 // ── Gate validation ─────────────────────────────────────────────────────────
 
-function validateClosureGate(to: TermDepositState, gate: ClosureGateInput | undefined): TransitionResult {
+function validateClosureGate(
+  to: TermDepositState,
+  gate: ClosureGateInput | undefined
+): TransitionResult {
   switch (to) {
     case "SETTLED_TO_ACCOUNT":
       return validateSettleGate(gate, "SETTLE_TO_ACCOUNT");
@@ -157,7 +163,10 @@ function validateClosureGate(to: TermDepositState, gate: ClosureGateInput | unde
 
 type SettleKind = "SETTLE_TO_ACCOUNT" | "PRETERMINATE";
 
-function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: SettleKind): TransitionResult {
+function validateSettleGate(
+  gate: ClosureGateInput | undefined,
+  expectedKind: SettleKind
+): TransitionResult {
   if (gate === undefined) {
     return { ok: false, reason: `${expectedKind} closure requires a gate input` };
   }
@@ -176,7 +185,10 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
   if (!isIsoDate(gate.actualSettlementDate)) {
     return { ok: false, reason: "actualSettlementDate must be ISO YYYY-MM-DD" };
   }
-  if (!Number.isInteger(gate.actualReceivedTotalMinor) || gate.actualReceivedTotalMinor < 0) {
+  if (
+    !Number.isInteger(gate.actualReceivedTotalMinor) ||
+    gate.actualReceivedTotalMinor < 0
+  ) {
     return { ok: false, reason: "actualReceivedTotalMinor must be a non-negative integer" };
   }
   for (const [name, value] of [
@@ -188,7 +200,10 @@ function validateSettleGate(gate: ClosureGateInput | undefined, expectedKind: Se
       return { ok: false, reason: `${name} must be a non-negative integer` };
     }
   }
-  if (typeof gate.balancedLedgerRef !== "string" || gate.balancedLedgerRef.trim() === "") {
+  if (
+    typeof gate.balancedLedgerRef !== "string" ||
+    gate.balancedLedgerRef.trim() === ""
+  ) {
     return { ok: false, reason: "balancedLedgerRef is required" };
   }
   return { ok: true };
