@@ -194,7 +194,10 @@ export class TermDepositApplicationService {
       patch.bankQuotedGrossInterestMinor !== null &&
       (!Number.isSafeInteger(patch.bankQuotedGrossInterestMinor) || patch.bankQuotedGrossInterestMinor < 0)
     ) {
-      return fail("INVALID_INPUT", "bankQuotedGrossInterestMinor must be a non-negative safe integer or null");
+      return fail(
+        "INVALID_INPUT",
+        "bankQuotedGrossInterestMinor must be a non-negative safe integer or null"
+      );
     }
     if (
       patch.bankQuotedNetInterestMinor !== undefined &&
@@ -208,7 +211,10 @@ export class TermDepositApplicationService {
       patch.bankQuotedMaturityAmountMinor !== null &&
       (!Number.isSafeInteger(patch.bankQuotedMaturityAmountMinor) || patch.bankQuotedMaturityAmountMinor < 0)
     ) {
-      return fail("INVALID_INPUT", "bankQuotedMaturityAmountMinor must be a non-negative safe integer or null");
+      return fail(
+        "INVALID_INPUT",
+        "bankQuotedMaturityAmountMinor must be a non-negative safe integer or null"
+      );
     }
 
     let updated: TermDepositRecord;
