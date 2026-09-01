@@ -488,7 +488,6 @@ describe("predecessor / successor links", () => {
       })
     );
 
-    // M1B exposes linked reads but deliberately does not expose the renewal\n    // write. Seed the future-slice relationship directly as test fixture data.\n    await db.exec(`UPDATE term_deposits SET successor_deposit_id = ${b.id} WHERE id = ${a.id}`);
     const successor = await repo.loadSuccessor(a.id);
     expect(successor?.id).toBe(b.id);
 
