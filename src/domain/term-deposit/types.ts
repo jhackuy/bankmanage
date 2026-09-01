@@ -12,7 +12,7 @@
  * Fixed integer scale used for rates (annual rate and tax rate).
  *
  *   scaled_value = rate × RATE_SCALE
- *   5%   → 5_000_000
+ *   5%   → 50_000
  *   20%  → 200_000
  *   0.5% → 5_000
  *
@@ -26,7 +26,7 @@ export const RATE_SCALE = 1_000_000;
  * as a bug or typo and rejected. 100% per year is already extreme for a
  * consumer term deposit; 1000% is a hard sanity ceiling.
  */
-export const MAX_ANNUAL_RATE_SCALED = RATE_SCALE * 1_000;
+export const MAX_ANNUAL_RATE_SCALED = RATE_SCALE * 10;
 
 /** Maximum tax rate (100%). Tax above this is rejected. */
 export const MAX_TAX_RATE_SCALED = RATE_SCALE;
