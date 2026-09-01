@@ -20,6 +20,7 @@ import {
   D1TermDepositRepository,
   TermDepositApplicationService,
   type CreateDraftInput,
+  type EditableFactsPatch,
 } from "../../src/services/term-deposit/index.js";
 import { seedDepositParents, seedBankAccount, type SeededParents } from "../_helpers/seed.js";
 
@@ -444,6 +445,43 @@ describe("COMPOUND interest rejection", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("INVALID_INPUT");
+  });
+});
+
+// ── Editable patch boundary validation ─────────────────────────────────────
+
+describe("editable patch boundary validation", () => {
+  it("rejects invalid non-financial patch fields with zero mutation", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const invalidPatches = [
+      { productName: "   " },
+      { nickname: 42 },
+      { dayCountBasis: "ACT_999" },
+      { maturityInstruction: "AUTO_SETTLE" },
+      { maturitySettlementAccountId: 0 },
+      { sourceEvidenceRef: 42 },
+    ] as unknown as EditableFactsPatch[];
+
+    for (const patch of invalidPatches) {
+      const result = await service.updateEditableFacts(created.value.record.id, patch);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("INVALID_INPUT");
+    }
+
+    const unchanged = await service.getDeposit(created.value.record.id);
+    expect(unchanged.ok).toBe(true);
+    if (!unchanged.ok || unchanged.value === null) return;
+    expect(unchanged.value.record.productName).toBe("Test TD Product");
+    expect(unchanged.value.record.state).toBe("DRAFT");
   });
 });
 
