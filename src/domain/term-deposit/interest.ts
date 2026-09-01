@@ -244,6 +244,8 @@ export function calculateEstimate(inputs: InterestInputs): InterestEstimate {
         "COMPOUND interest calculation requires a compounding-frequency contract " +
           "that is not specified in SPEC.md. Treat as a blocker; do not silently guess."
       );
+    default:
+      throw new Error(`Unsupported interest method: ${String(inputs.interestMethod)}`);
   }
 }
 
