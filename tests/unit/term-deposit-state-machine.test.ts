@@ -489,6 +489,15 @@ describe("CANCELLED does not require evidence", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  it("DRAFT -> CANCELLED rejects a mismatched closure gate", () => {
+    const result = transition({
+      from: "DRAFT",
+      to: "CANCELLED",
+      gate: validRenewGate(),
+    });
+    expect(result.ok).toBe(false);
+  });
+
   it("CANCELLED is never reachable from non-DRAFT states", () => {
     const nonDraft: TermDepositState[] = ["REVIEW_REQUIRED", "ACTIVE", "MATURED_ACTION_REQUIRED"];
     for (const from of nonDraft) {
