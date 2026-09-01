@@ -133,9 +133,50 @@ export class TermDepositApplicationService {
         `editable facts can only be patched in DRAFT or REVIEW_REQUIRED; current state is ${existing.state}`
       );
     }
+    if (
+      patch.productName !== undefined &&
+      (typeof patch.productName !== "string" || patch.productName.trim() === "")
+    ) {
+      return fail("INVALID_INPUT", "productName must be a non-empty string");
+    }
+    if (
+      patch.nickname !== undefined &&
+      patch.nickname !== null &&
+      typeof patch.nickname !== "string"
+    ) {
+      return fail("INVALID_INPUT", "nickname must be a string or null");
+    }
     if (patch.certificateLastFour !== undefined) {
       const certCheck = validateCertificate(patch.certificateLastFour);
       if (!certCheck.ok) return certCheck;
+    }
+    if (
+      patch.dayCountBasis !== undefined &&
+      !["ACT_365", "ACT_360", "ACT_ACT"].includes(patch.dayCountBasis)
+    ) {
+      return fail("INVALID_INPUT", "dayCountBasis is invalid");
+    }
+    if (patch.maturityInstruction !== undefined) {
+      const instructionCheck = validateMaturityInstruction(patch.maturityInstruction);
+      if (!instructionCheck.ok) return instructionCheck;
+    }
+    if (
+      patch.maturitySettlementAccountId !== undefined &&
+      patch.maturitySettlementAccountId !== null &&
+      (!Number.isSafeInteger(patch.maturitySettlementAccountId) ||
+        patch.maturitySettlementAccountId <= 0)
+    ) {
+      return fail(
+        "INVALID_INPUT",
+        "maturitySettlementAccountId must be a positive safe integer or null"
+      );
+    }
+    if (
+      patch.sourceEvidenceRef !== undefined &&
+      patch.sourceEvidenceRef !== null &&
+      typeof patch.sourceEvidenceRef !== "string"
+    ) {
+      return fail("INVALID_INPUT", "sourceEvidenceRef must be a string or null");
     }
     if (patch.interestMethod !== undefined) {
       const methodCheck = validateInterestMethod(patch.interestMethod);
