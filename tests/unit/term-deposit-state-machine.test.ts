@@ -30,6 +30,10 @@ function validSettleGate(): ClosureGateInput {
     evidenceRef: "fakesigned://documents/settlement-evidence-1.pdf",
     actualSettlementDate: "2026-04-02",
     actualReceivedTotalMinor: 10_098_630,
+    actualGrossInterestMinor: 123_288,
+    actualTaxMinor: 24_658,
+    actualPenaltyFeesMinor: 0,
+    balancedLedgerRef: "ledger://batch/settlement-1",
   };
 }
 
@@ -40,6 +44,10 @@ function validPreterminateGate(): ClosureGateInput {
     evidenceRef: "fakesigned://documents/preterm-evidence-1.pdf",
     actualSettlementDate: "2026-03-15",
     actualReceivedTotalMinor: 9_900_000,
+    actualGrossInterestMinor: 0,
+    actualTaxMinor: 0,
+    actualPenaltyFeesMinor: 100_000,
+    balancedLedgerRef: "ledger://batch/preterminate-1",
   };
 }
 
@@ -52,6 +60,7 @@ function validRenewGate(): ClosureGateInput {
     newRateScaled: 50_000,
     newStartDate: "2026-04-02",
     newMaturityDate: "2026-10-02",
+    interestDisposition: "CAPITALIZED",
   };
 }
 
@@ -350,6 +359,26 @@ describe("settle-gate field validation", () => {
     });
     expect(result).toEqual({ ok: true });
   });
+
+  it("rejects closure without a balanced ledger reference", () => {
+    const gate = { ...validSettleGate(), balancedLedgerRef: " " };
+    const result = transition({
+      from: "MATURED_ACTION_REQUIRED",
+      to: "SETTLED_TO_ACCOUNT",
+      gate,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects negative actual tax/fee facts", () => {
+    const gate = { ...validSettleGate(), actualTaxMinor: -1 };
+    const result = transition({
+      from: "MATURED_ACTION_REQUIRED",
+      to: "SETTLED_TO_ACCOUNT",
+      gate,
+    });
+    expect(result.ok).toBe(false);
+  });
 });
 
 // ── Renew-gate field validation ─────────────────────────────────────────────
@@ -413,6 +442,33 @@ describe("renew-gate field validation", () => {
       gate,
     });
     expect(result.ok).toBe(false);
+  });
+
+  it("requires a settlement account when renewed interest is paid out", () => {
+    const gate = {
+      ...validRenewGate(),
+      interestDisposition: "SETTLED_TO_ACCOUNT" as const,
+    };
+    const result = transition({
+      from: "MATURED_ACTION_REQUIRED",
+      to: "RENEWED",
+      gate,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("records a valid renewed-interest settlement destination", () => {
+    const gate = {
+      ...validRenewGate(),
+      interestDisposition: "SETTLED_TO_ACCOUNT" as const,
+      interestSettlementAccountId: 42,
+    };
+    const result = transition({
+      from: "MATURED_ACTION_REQUIRED",
+      to: "RENEWED",
+      gate,
+    });
+    expect(result).toEqual({ ok: true });
   });
 });
 
