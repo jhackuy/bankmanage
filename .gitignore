@@ -1,0 +1,63 @@
+# Secrets and local environment files
+.dev.vars
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+
+# Cloudflare / Wrangler local state
+.wrangler/
+wrangler-state/
+
+# Local D1 database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+.d1/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+
+# TypeScript
+*.tsbuildinfo
+
+# Uploads and financial documents (never commit real documents)
+uploads/
+screenshots/
+documents/
+receipts/
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.webp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Test coverage and reports
+coverage/
+.nyc_output/
+playwright-report/
+test-results/

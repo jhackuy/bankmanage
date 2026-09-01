@@ -1,0 +1,24 @@
+# .dev.vars.example — Template for local development secrets
+# Copy to .dev.vars and fill in values for local testing only.
+# NEVER commit .dev.vars or any file with real values.
+#
+# Secrets listed here are NAMES ONLY. Real values belong in:
+#   - Cloudflare Worker secrets (wrangler secret put)
+#   - GitHub Actions Secrets (for CI deployment jobs)
+#
+# For M0 development and tests, leave these unset.
+# The fake/stub adapters run without any secrets.
+
+# Telegram Bot Token — obtain from @BotFather
+TELEGRAM_BOT_TOKEN=
+
+# Telegram webhook secret — a strong random string you generate
+TELEGRAM_WEBHOOK_SECRET=
+
+# Telegram User IDs allowed to use the app (comma-separated, no spaces)
+# Example format only — replace with real IDs in production secrets
+TELEGRAM_ALLOWED_USER_IDS=
+
+# Optional: app environment override for local dev
+# Valid values are environment labels such as development, test, or pilot.
+APP_ENV=
