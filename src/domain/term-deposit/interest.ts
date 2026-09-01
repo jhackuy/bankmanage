@@ -149,7 +149,7 @@ function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
   const start = parseIsoDateUtc(inputs.startDate);
   const end = parseIsoDateUtc(inputs.maturityDate);
   if (end.getTime() < start.getTime()) {
-    throw new Error(`Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`);
+    throw new Error(\n      `Maturity date ${inputs.maturityDate} is before start date ${inputs.startDate}`\n    );
   }
 
   const principal = BigInt(inputs.principalMinor);
@@ -185,10 +185,7 @@ function computeSimpleGrossMinor(inputs: InterestInputs): bigint {
 
   const commonYearDenominator = 365n * 366n;
   const weightedDays = daysIn365Years * 366n + daysIn366Years * 365n;
-  return roundHalfAway(
-    principal * rate * weightedDays,
-    scale * commonYearDenominator
-  );
+  return roundHalfAway(principal * rate * weightedDays, scale * commonYearDenominator);
 }
 
 /**
