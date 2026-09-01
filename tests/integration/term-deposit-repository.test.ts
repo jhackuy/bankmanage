@@ -469,7 +469,7 @@ describe("predecessor / successor links", () => {
     expect(loaded?.productName).toBe("Predecessor");
   });
 
-  it("setSuccessorLink writes the successor on the predecessor", async () => {
+  it("loadSuccessor resolves a persisted renewal link", async () => {
     const a = await repo.insertDraft(
       VALID_DRAFT({
         accountId: seeded.accountId,
@@ -488,7 +488,7 @@ describe("predecessor / successor links", () => {
       })
     );
 
-    await repo.setSuccessorLink(a.id, b.id);
+    // M1B exposes linked reads but deliberately does not expose the renewal\n    // write. Seed the future-slice relationship directly as test fixture data.\n    await db.prepare("UPDATE term_deposits SET successor_deposit_id = ? WHERE id = ?").bind(b.id, a.id).run();
     const successor = await repo.loadSuccessor(a.id);
     expect(successor?.id).toBe(b.id);
 
