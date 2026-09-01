@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 npm ci
 npm run format
-npm run format:check
-npm run lint
-npm run typecheck
-npm test
-npm run migrate:check
-npm run build
+
+status=0
+npm run format:check || status=1
+npm run lint || status=1
+npm run typecheck || status=1
+npm test || status=1
+npm run migrate:check || status=1
+npm run build || status=1
+
+exit "$status"
