@@ -24,6 +24,8 @@
 
 import {
   calculateEstimate,
+  DAY_COUNT_BASES,
+  MATURITY_INSTRUCTIONS,
   MAX_ANNUAL_RATE_SCALED,
   MAX_TAX_RATE_SCALED,
   transition as validateTransition,
@@ -132,7 +134,22 @@ export class TermDepositApplicationService {
     let record: TermDepositRecord;
     try {
       record = await this.repo.insertDraft(input);
-    } catch {
+    } catch (err) {
+      // Race-safe boundary: the UNIQUE index on predecessor_deposit_id
+      // catches concurrent inserts that both reference the same predecessor.
+      // The service-level pre-check above handles the common case; this
+      // branch covers the race where a sibling request slipped between the
+      // pre-check and the INSERT.
+      if (
+        input.predecessorDepositId !== undefined &&
+        err instanceof Error &&
+        /UNIQUE.*predecessor_deposit_id|SQLITE_CONSTRAINT/i.test(err.message)
+      ) {
+        return fail(
+          "DUPLICATE_LINK",
+          `predecessor deposit ${input.predecessorDepositId} already has a successor`
+        );
+      }
       return fail("INTERNAL", "Unable to create term deposit");
     }
     return ok({ record, estimate });
@@ -167,10 +184,7 @@ export class TermDepositApplicationService {
       const certCheck = validateCertificate(patch.certificateLastFour);
       if (!certCheck.ok) return certCheck;
     }
-    if (
-      patch.dayCountBasis !== undefined &&
-      !["ACT_365", "ACT_360", "ACT_ACT"].includes(patch.dayCountBasis)
-    ) {
+    if (patch.dayCountBasis !== undefined && !DAY_COUNT_BASES.includes(patch.dayCountBasis)) {
       return fail("INVALID_INPUT", "dayCountBasis is invalid");
     }
     if (patch.maturityInstruction !== undefined) {
@@ -533,6 +547,17 @@ export class TermDepositApplicationService {
       if (pred === null) {
         return fail("PREDECESSOR_NOT_FOUND", `predecessor deposit ${input.predecessorDepositId} not found`);
       }
+      // Enforce the 1:1 predecessor→successor invariant. The schema-level
+      // UNIQUE index on predecessor_deposit_id is the race-safe boundary;
+      // this pre-check avoids an unnecessary INSERT and gives a clearer
+      // error for the common case.
+      const existingSuccessor = await this.repo.loadSuccessor(input.predecessorDepositId);
+      if (existingSuccessor !== null) {
+        return fail(
+          "DUPLICATE_LINK",
+          `predecessor deposit ${input.predecessorDepositId} already has successor deposit ${existingSuccessor.id}`
+        );
+      }
       // Self-loop is prevented by the schema CHECK constraint
       // (predecessor_deposit_id IS NULL OR predecessor_deposit_id <> id).
       // We can't enforce it in the application layer because the new row's
@@ -570,7 +595,7 @@ function validateInterestMethod(method: InterestMethod): ServiceResult<true> {
 }
 
 function validateMaturityInstruction(instruction: MaturityInstruction): ServiceResult<true> {
-  if (!["SETTLE_TO_ACCOUNT", "RENEW", "PRETERMINATE", "PENDING"].includes(instruction)) {
+  if (!MATURITY_INSTRUCTIONS.includes(instruction)) {
     return invalid("INVALID_INPUT", `maturityInstruction is invalid: ${String(instruction)}`);
   }
   return ok(true);

@@ -889,6 +889,95 @@ describe("predecessor / successor link reads", () => {
     if (r.ok) return;
     expect(r.error.code).toBe("NOT_FOUND");
   });
+
+  it("rejects creating a second deposit that points to an already-linked predecessor", async () => {
+    const a = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "A",
+      })
+    );
+    expect(a.ok).toBe(true);
+    if (!a.ok) return;
+    const aId = a.value.record.id;
+
+    const b = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "B",
+        predecessorDepositId: aId,
+      })
+    );
+    expect(b.ok).toBe(true);
+    if (!b.ok) return;
+
+    const c = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "C",
+        predecessorDepositId: aId,
+      })
+    );
+    expect(c.ok).toBe(false);
+    if (c.ok) return;
+    expect(c.error.code).toBe("DUPLICATE_LINK");
+
+    const succ = await service.getSuccessor(aId);
+    expect(succ.ok).toBe(true);
+    if (!succ.ok) return;
+    expect(succ.value?.id).toBe(b.value.record.id);
+  });
+
+  it("rejected duplicate-successor createDraft leaves zero extra rows", async () => {
+    const a = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "A",
+      })
+    );
+    expect(a.ok).toBe(true);
+    if (!a.ok) return;
+    const aId = a.value.record.id;
+
+    await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "B",
+        predecessorDepositId: aId,
+      })
+    );
+
+    const before = await service.listDeposits(seeded.memberId);
+    expect(before.ok).toBe(true);
+    if (!before.ok) return;
+    const beforeCount = before.value.length;
+
+    const c = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "C",
+        predecessorDepositId: aId,
+      })
+    );
+    expect(c.ok).toBe(false);
+
+    const after = await service.listDeposits(seeded.memberId);
+    expect(after.ok).toBe(true);
+    if (!after.ok) return;
+    expect(after.value.length).toBe(beforeCount);
+  });
 });
 
 // ── getDeposit / listDeposits edge cases ───────────────────────────────────

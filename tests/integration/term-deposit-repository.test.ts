@@ -494,6 +494,42 @@ describe("predecessor / successor links", () => {
     const predecessor = await repo.loadPredecessor(b.id);
     expect(predecessor?.id).toBe(a.id);
   });
+
+  it("insertDraft rejects a second deposit pointing to the same predecessor (UNIQUE race boundary)", async () => {
+    const pred = await repo.insertDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "Predecessor",
+      })
+    );
+    await repo.insertDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        productName: "First Successor",
+        predecessorDepositId: pred.id,
+      })
+    );
+
+    await expect(
+      repo.insertDraft(
+        VALID_DRAFT({
+          accountId: seeded.accountId,
+          bankId: seeded.bankId,
+          holderMemberId: seeded.memberId,
+          productName: "Second Successor",
+          predecessorDepositId: pred.id,
+        })
+      )
+    ).rejects.toThrow(/UNIQUE/);
+
+    // The first successor row remains the sole successor.
+    const successor = await repo.loadSuccessor(pred.id);
+    expect(successor?.productName).toBe("First Successor");
+  });
 });
 
 // ── linked-parent context reads ───────────────────────────────────────────
