@@ -9,7 +9,7 @@
  * No arithmetic happens here.
  */
 
-import type { D1Database } from "../../adapters/d1/fake.js";
+import type { D1Database } from "../../adapters/d1/types.js";
 import type {
   DayCountBasis,
   InterestMethod,

@@ -20,46 +20,10 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// ── Local D1 surface types ──────────────────────────────────────────────────
-// These mirror the subset of @cloudflare/workers-types used by this project.
-// We declare them locally so the fake stays testable without pulling in the
-// Workers types at compile time.
-
-export interface D1ResultMeta {
-  readonly duration: number;
-  readonly changes: number;
-  readonly last_row_id: number | null;
-  readonly served_by: string;
-  readonly rows_read: number;
-  readonly rows_written: number;
-}
-
-export interface D1Result<T = unknown> {
-  readonly results: T[];
-  readonly success: boolean;
-  readonly meta: D1ResultMeta;
-  readonly error?: string;
-}
-
-export interface D1ExecResult {
-  readonly count: number;
-  readonly duration: number;
-}
-
-export interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T = Record<string, unknown>>(colName?: string): Promise<T | null>;
-  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
-  run<T = Record<string, unknown>>(): Promise<D1Result<T>>;
-  raw<T = unknown[]>(): Promise<T[]>;
-}
-
-export interface D1Database {
-  prepare(query: string): D1PreparedStatement;
-  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
-  exec(query: string): Promise<D1ExecResult>;
-  dump(): Promise<ArrayBuffer>;
-}
+// D1 surface types live in a types-only module so production code can
+// import them without pulling in Node-only fake dependencies.
+export type { D1Database, D1ExecResult, D1PreparedStatement, D1Result, D1ResultMeta } from "./types.js";
+import type { D1Database, D1PreparedStatement, D1Result, D1ExecResult } from "./types.js";
 
 // ── Implementation ──────────────────────────────────────────────────────────
 

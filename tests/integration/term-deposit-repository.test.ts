@@ -83,7 +83,7 @@ describe("create / get / list", () => {
     expect(record.updatedAt).not.toBe("");
   });
 
-  it("row mapping never produces JS floating-point intermediate values", async () => {
+  it("row mapping preserves integer money and rate fields through the SQLite round-trip", async () => {
     // Round-trip an integer through the SQLite path. The result must be
     // exactly the same integer; no truncation or representation drift.
     const record = await repo.insertDraft(
