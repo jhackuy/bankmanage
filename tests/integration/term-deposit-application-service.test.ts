@@ -854,7 +854,7 @@ describe("predecessor / successor link reads", () => {
     const succ = await service.getSuccessor(a.value.record.id);
     expect(succ.ok).toBe(true);
     if (!succ.ok) return;
-    expect(succ.value).toBeNull(); // A does not yet have a successor
+    expect(succ.value?.id).toBe(b.value.record.id); // B was created with predecessorDepositId=A.id, so getSuccessor(A) resolves B
   });
 
   it("getPredecessor returns NOT_FOUND for an unknown deposit id", async () => {
