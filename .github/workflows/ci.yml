@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact commit SHA to validate
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -9,7 +14,7 @@ on:
 
 # One useful CI run per PR/main update; superseded runs are cancelled.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || inputs.target_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,8 +26,10 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
+      - name: Checkout exact target
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_sha || github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
