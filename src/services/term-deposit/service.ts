@@ -463,6 +463,9 @@ export class TermDepositApplicationService {
     const datesCheck = validateDates(input.startDate, input.maturityDate);
     if (!datesCheck.ok) return datesCheck;
 
+    if (typeof input.currencyCode !== "string" || input.currencyCode.trim() === "") {
+      return fail("INVALID_INPUT", "currencyCode must be a non-empty string");
+    }
     if (typeof input.productName !== "string" || input.productName.trim() === "") {
       return fail("INVALID_INPUT", "productName must be a non-empty string");
     }

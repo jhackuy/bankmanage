@@ -441,6 +441,49 @@ describe("non-closure state transitions", () => {
   });
 });
 
+// ── empty allowedStates guard ──────────────────────────────────────────────
+
+describe("empty allowedStates guard", () => {
+  it("updateEditableFacts rejects an empty allowedStates array before SQL", async () => {
+    const created = await repo.insertDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    await expect(repo.updateEditableFacts(created.id, { productName: "X" }, [])).rejects.toThrow(
+      /allowedStates must contain at least one state/
+    );
+  });
+
+  it("updateBankQuotedFacts rejects an empty allowedStates array before SQL", async () => {
+    const created = await repo.insertDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    await expect(
+      repo.updateBankQuotedFacts(created.id, { bankQuotedGrossInterestMinor: 100 }, [])
+    ).rejects.toThrow(/allowedStates must contain at least one state/);
+  });
+
+  it("updateMaturityInstruction rejects an empty allowedStates array before SQL", async () => {
+    const created = await repo.insertDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    await expect(repo.updateMaturityInstruction(created.id, "SETTLE_TO_ACCOUNT", null, [])).rejects.toThrow(
+      /allowedStates must contain at least one state/
+    );
+  });
+});
+
 // ── predecessor / successor link storage ──────────────────────────────────
 
 describe("predecessor / successor links", () => {

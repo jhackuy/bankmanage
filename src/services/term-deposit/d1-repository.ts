@@ -100,6 +100,12 @@ const M1B_TRANSITION_EDGES = new Set([
   "DRAFT->CANCELLED",
 ]);
 
+function assertAllowedStates(method: string, allowedStates: readonly TermDepositState[]): void {
+  if (allowedStates.length === 0) {
+    throw new Error(`${method}: allowedStates must contain at least one state`);
+  }
+}
+
 export class D1TermDepositRepository implements TermDepositRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -185,6 +191,7 @@ export class D1TermDepositRepository implements TermDepositRepository {
     patch: EditableFactsPatch,
     allowedStates: readonly TermDepositState[]
   ): Promise<TermDepositRecord> {
+    assertAllowedStates("updateEditableFacts", allowedStates);
     const sets: string[] = [];
     const params: unknown[] = [];
 
@@ -278,6 +285,7 @@ export class D1TermDepositRepository implements TermDepositRepository {
     patch: BankQuotedPatch,
     allowedStates: readonly TermDepositState[]
   ): Promise<TermDepositRecord> {
+    assertAllowedStates("updateBankQuotedFacts", allowedStates);
     const sets: string[] = [];
     const params: unknown[] = [];
 
@@ -327,6 +335,7 @@ export class D1TermDepositRepository implements TermDepositRepository {
     settlementAccountId: number | null,
     allowedStates: readonly TermDepositState[]
   ): Promise<TermDepositRecord> {
+    assertAllowedStates("updateMaturityInstruction", allowedStates);
     const placeholders = allowedStates.map(() => "?").join(", ");
     const sql =
       `UPDATE term_deposits SET maturity_instruction = ?, ` +

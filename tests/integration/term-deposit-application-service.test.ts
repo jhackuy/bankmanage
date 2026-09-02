@@ -467,6 +467,25 @@ describe("dayCountBasis validation at create boundary", () => {
   });
 });
 
+// ── currencyCode boundary validation ──────────────────────────────────────
+
+describe("currencyCode boundary validation", () => {
+  it("createDraft rejects an empty currencyCode with INVALID_INPUT before DB access", async () => {
+    const r = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        currencyCode: "",
+      })
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+    expect(r.error.message).toMatch(/currencyCode/);
+  });
+});
+
 // ── Editable patch boundary validation ─────────────────────────────────────
 
 describe("editable patch boundary validation", () => {
