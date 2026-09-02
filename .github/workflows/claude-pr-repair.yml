@@ -165,7 +165,7 @@ jobs:
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
-            --exclude-dynamic-system-prompt-sections --autocompact 80k --max-turns 20 \
+            --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 20 \
             --no-session-persistence --output-format json \
             "Repair only the failures in .agent-task/validation-after.log. Use .agent-task/context.md for PR scope. Fix root cause only, do not broaden scope, do not create branches/PRs, do not deploy, and do not run commands." \
             > .agent-task/claude-repair-2.json
