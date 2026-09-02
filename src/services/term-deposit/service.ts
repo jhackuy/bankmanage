@@ -94,13 +94,13 @@ export class TermDepositApplicationService {
 
   async getPredecessor(id: number): Promise<ServiceResult<TermDepositRecord | null>> {
     const self = await this.repo.findById(id);
-    if (self === null) return fail("NOT_FOUND", `term deposit ${id} not found`);
+    if (self === null) return fail("DEPOSIT_NOT_FOUND", `term deposit ${id} not found`);
     return ok(await this.repo.loadPredecessor(id));
   }
 
   async getSuccessor(id: number): Promise<ServiceResult<TermDepositRecord | null>> {
     const self = await this.repo.findById(id);
-    if (self === null) return fail("NOT_FOUND", `term deposit ${id} not found`);
+    if (self === null) return fail("DEPOSIT_NOT_FOUND", `term deposit ${id} not found`);
     return ok(await this.repo.loadSuccessor(id));
   }
 
@@ -430,6 +430,14 @@ export class TermDepositApplicationService {
     // before persistence to keep error handling uniform.
     const methodCheck = validateInterestMethod(input.interestMethod);
     if (!methodCheck.ok) return methodCheck;
+
+    // Day-count basis must come from the domain source-of-truth list. The
+    // calculator only accepts these values too, but validating at the
+    // untrusted runtime boundary gives callers a typed INVALID_INPUT before
+    // persistence instead of a calculator throw after it.
+    if (!DAY_COUNT_BASES.includes(input.dayCountBasis)) {
+      return fail("INVALID_INPUT", "dayCountBasis is invalid");
+    }
 
     // Strict money/rate/date validation through the same checks the
     // calculator performs. We re-run them so the application service can

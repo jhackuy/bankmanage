@@ -448,6 +448,25 @@ describe("COMPOUND interest rejection", () => {
   });
 });
 
+// ── dayCountBasis validation at create boundary ────────────────────────────
+
+describe("dayCountBasis validation at create boundary", () => {
+  it("createDraft rejects an unknown dayCountBasis with INVALID_INPUT", async () => {
+    const r = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        dayCountBasis: "ACT_999" as unknown as "ACT_365",
+      })
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+    expect(r.error.message).toMatch(/dayCountBasis/);
+  });
+});
+
 // ── Editable patch boundary validation ─────────────────────────────────────
 
 describe("editable patch boundary validation", () => {
@@ -883,11 +902,11 @@ describe("predecessor / successor link reads", () => {
     expect(succ.value?.id).toBe(b.value.record.id); // B was created with predecessorDepositId=A.id, so getSuccessor(A) resolves B
   });
 
-  it("getPredecessor returns NOT_FOUND for an unknown deposit id", async () => {
+  it("getPredecessor returns DEPOSIT_NOT_FOUND for an unknown deposit id", async () => {
     const r = await service.getPredecessor(999_999);
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.code).toBe("NOT_FOUND");
+    expect(r.error.code).toBe("DEPOSIT_NOT_FOUND");
   });
 
   it("rejects creating a second deposit that points to an already-linked predecessor", async () => {
