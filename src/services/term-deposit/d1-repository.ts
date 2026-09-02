@@ -4,9 +4,9 @@
  * All SQL is parameterized. No raw D1 binding escapes this module — the
  * application service sees only the abstract `TermDepositRepository` port.
  *
- * Row mapping converts every money/rate column through `Number()` (safe
- * because SQLite INTEGER values are stored losslessly); the result is the
- * integer the application expects. No arithmetic happens here.
+ * Row mapping returns money/rate columns directly. The TypeScript row type
+ * guarantees they are numbers; SQLite INTEGER storage keeps them lossless.
+ * No arithmetic happens here.
  */
 
 import type { D1Database } from "../../adapters/d1/fake.js";

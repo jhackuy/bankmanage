@@ -650,6 +650,32 @@ describe("zero partial mutation on rejected operations", () => {
     expect(after.value.length).toBe(beforeCount);
   });
 
+  it("createDraft with safe-integer inputs that overflow the computed estimate leaves zero rows", async () => {
+    const before = await service.listDeposits(seeded.memberId);
+    expect(before.ok).toBe(true);
+    if (!before.ok) return;
+    const beforeCount = before.value.length;
+
+    // MAX_SAFE_INTEGER is a valid safe-integer input (passes validateMoney),
+    // but any non-zero rate makes maturityAmountMinor = principal + net
+    // exceed MAX_SAFE_INTEGER and the calculator throws.
+    const r = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+        principalMinor: Number.MAX_SAFE_INTEGER,
+        annualRateScaled: 1_000,
+      })
+    );
+    expect(r.ok).toBe(false);
+
+    const after = await service.listDeposits(seeded.memberId);
+    expect(after.ok).toBe(true);
+    if (!after.ok) return;
+    expect(after.value.length).toBe(beforeCount);
+  });
+
   it("rejected updateEditableFacts leaves the row unchanged", async () => {
     const created = await service.createDraft(
       VALID_DRAFT({

@@ -108,13 +108,34 @@ export class TermDepositApplicationService {
     const validation = await this.validateCreateInput(input);
     if (!validation.ok) return validation;
 
+    // Compute the deterministic estimate from the validated input BEFORE
+    // INSERT. The inputs already passed validateCreateInput, so the only
+    // remaining throw from calculateEstimate is a safe-integer overflow on
+    // the computed maturity amount. Catching here keeps the zero-partial-
+    // mutation invariant: no row is persisted when the estimate overflows.
+    let estimate: InterestEstimate;
+    try {
+      estimate = calculateEstimate({
+        principalMinor: input.principalMinor,
+        annualRateScaled: input.annualRateScaled,
+        taxRateScaled: input.taxRateScaled,
+        feesMinor: input.feesMinor,
+        startDate: input.startDate,
+        maturityDate: input.maturityDate,
+        interestMethod: input.interestMethod,
+        dayCountBasis: input.dayCountBasis,
+      });
+    } catch {
+      return fail("INVALID_INPUT", "interest estimate exceeds safe-integer range; reduce principal or rate");
+    }
+
     let record: TermDepositRecord;
     try {
       record = await this.repo.insertDraft(input);
     } catch {
       return fail("INTERNAL", "Unable to create term deposit");
     }
-    return ok({ record, estimate: this.computeEstimate(record) });
+    return ok({ record, estimate });
   }
 
   // ── Writes: editable draft/review facts ──────────────────────────────────
@@ -194,6 +215,40 @@ export class TermDepositApplicationService {
         patch.maturityDate ?? existing.maturityDate
       );
       if (!datesCheck.ok) return datesCheck;
+    }
+
+    // If the patch touches estimate-affecting fields, compute the estimate
+    // from the merged values BEFORE UPDATE so a safe-integer overflow cannot
+    // produce partial mutation. validateMoney above already rejected inputs
+    // outside safe-integer ranges, so the only remaining throw is overflow.
+    const affectsEstimate =
+      patch.principalMinor !== undefined ||
+      patch.annualRateScaled !== undefined ||
+      patch.taxRateScaled !== undefined ||
+      patch.feesMinor !== undefined ||
+      patch.startDate !== undefined ||
+      patch.maturityDate !== undefined ||
+      patch.interestMethod !== undefined ||
+      patch.dayCountBasis !== undefined;
+
+    if (affectsEstimate) {
+      try {
+        calculateEstimate({
+          principalMinor: patch.principalMinor ?? existing.principalMinor,
+          annualRateScaled: patch.annualRateScaled ?? existing.annualRateScaled,
+          taxRateScaled: patch.taxRateScaled ?? existing.taxRateScaled,
+          feesMinor: patch.feesMinor ?? existing.feesMinor,
+          startDate: patch.startDate ?? existing.startDate,
+          maturityDate: patch.maturityDate ?? existing.maturityDate,
+          interestMethod: patch.interestMethod ?? existing.interestMethod,
+          dayCountBasis: patch.dayCountBasis ?? existing.dayCountBasis,
+        });
+      } catch {
+        return fail(
+          "INVALID_INPUT",
+          "interest estimate exceeds safe-integer range; reduce principal or rate"
+        );
+      }
     }
 
     let updated: TermDepositRecord;
