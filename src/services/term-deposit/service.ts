@@ -75,8 +75,12 @@ export class TermDepositApplicationService {
   async getDeposit(id: number): Promise<ServiceResult<TermDepositWithEstimate | null>> {
     const record = await this.repo.findById(id);
     if (record === null) return ok(null);
-    const estimate = this.computeEstimate(record);
-    return ok({ record, estimate });
+    try {
+      const estimate = this.computeEstimate(record);
+      return ok({ record, estimate });
+    } catch {
+      return fail("INTERNAL", "interest estimate cannot be computed from the stored record");
+    }
   }
 
   async listDeposits(holderMemberId: number): Promise<ServiceResult<TermDepositWithEstimate[]>> {
@@ -85,11 +89,15 @@ export class TermDepositApplicationService {
       return fail("MEMBER_NOT_FOUND", `household member ${holderMemberId} does not exist`);
     }
     const records = await this.repo.listByHolder(holderMemberId);
-    const enriched: TermDepositWithEstimate[] = records.map((record) => ({
-      record,
-      estimate: this.computeEstimate(record),
-    }));
-    return ok(enriched);
+    try {
+      const enriched: TermDepositWithEstimate[] = records.map((record) => ({
+        record,
+        estimate: this.computeEstimate(record),
+      }));
+      return ok(enriched);
+    } catch {
+      return fail("INTERNAL", "interest estimate cannot be computed from one or more stored records");
+    }
   }
 
   async getPredecessor(id: number): Promise<ServiceResult<TermDepositRecord | null>> {
@@ -278,7 +286,12 @@ export class TermDepositApplicationService {
         err instanceof Error ? err.message : "stale state during editable-facts update"
       );
     }
-    return ok({ record: updated, estimate: this.computeEstimate(updated) });
+    try {
+      const estimate = this.computeEstimate(updated);
+      return ok({ record: updated, estimate });
+    } catch {
+      return fail("INTERNAL", "interest estimate cannot be computed from the updated record");
+    }
   }
 
   // ── Writes: bank-quoted facts ────────────────────────────────────────────
@@ -331,7 +344,12 @@ export class TermDepositApplicationService {
         err instanceof Error ? err.message : "stale state during bank-quoted update"
       );
     }
-    return ok({ record: updated, estimate: this.computeEstimate(updated) });
+    try {
+      const estimate = this.computeEstimate(updated);
+      return ok({ record: updated, estimate });
+    } catch {
+      return fail("INTERNAL", "interest estimate cannot be computed from the updated record");
+    }
   }
 
   // ── Writes: lifecycle transitions ────────────────────────────────────────

@@ -1018,6 +1018,105 @@ describe("predecessor / successor link reads", () => {
   });
 });
 
+// ── ServiceResult no-throw contract ────────────────────────────────────────
+//
+// The application service must NEVER reject its returned promise on a
+// calculator failure. A stored record whose numeric fields exceed the
+// safe-integer range (for example, a row written by a buggy migration or
+// direct SQL) must surface as a typed INTERNAL ServiceResult so callers
+// (HTTP handlers, UI) always receive a structured outcome.
+
+describe("ServiceResult no-throw contract", () => {
+  // Corrupt the stored principal_minor so the M1A calculator rejects it
+  // (Number.isSafeInteger is false for MAX_SAFE_INTEGER + 1). The service
+  // must catch the throw and return a typed INTERNAL result.
+  async function corruptPrincipal(id: number): Promise<void> {
+    await db
+      .prepare("UPDATE term_deposits SET principal_minor = ? WHERE id = ?")
+      .bind(Number.MAX_SAFE_INTEGER + 1, id)
+      .run();
+  }
+
+  it("getDeposit returns typed INTERNAL instead of throwing on a corrupted stored record", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await corruptPrincipal(created.value.record.id);
+
+    const result = await service.getDeposit(created.value.record.id);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INTERNAL");
+  });
+
+  it("listDeposits returns typed INTERNAL instead of throwing on a corrupted stored record", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await corruptPrincipal(created.value.record.id);
+
+    const result = await service.listDeposits(seeded.memberId);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INTERNAL");
+  });
+
+  it("updateBankQuotedFacts returns typed INTERNAL instead of throwing on a corrupted stored record", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await corruptPrincipal(created.value.record.id);
+
+    const result = await service.updateBankQuotedFacts(created.value.record.id, {
+      bankQuotedGrossInterestMinor: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INTERNAL");
+  });
+
+  it("updateEditableFacts returns typed INTERNAL instead of throwing when a non-estimate patch persists against a corrupted stored record", async () => {
+    const created = await service.createDraft(
+      VALID_DRAFT({
+        accountId: seeded.accountId,
+        bankId: seeded.bankId,
+        holderMemberId: seeded.memberId,
+      })
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await corruptPrincipal(created.value.record.id);
+
+    // Patch a non-estimate field so the service-level pre-update estimate
+    // guard is skipped and the repo UPDATE succeeds. The post-update
+    // computeEstimate then encounters the corrupted principal_minor.
+    const result = await service.updateEditableFacts(created.value.record.id, {
+      productName: "X",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INTERNAL");
+  });
+});
+
 // ── getDeposit / listDeposits edge cases ───────────────────────────────────
 
 describe("read service edge cases", () => {
