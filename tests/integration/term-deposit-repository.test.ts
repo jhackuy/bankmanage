@@ -9,7 +9,7 @@
  *   - maturity-instruction update
  *   - non-closure state transitions (DRAFT -> REVIEW_REQUIRED, etc.)
  *   - predecessor / successor link storage
- *   - rejection paths: missing account, bad state, missing context
+ *   - rejection paths: missing deposit id, bad state, closure boundary, duplicate predecessor
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

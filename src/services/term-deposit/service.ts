@@ -139,11 +139,14 @@ export class TermDepositApplicationService {
       // catches concurrent inserts that both reference the same predecessor.
       // The service-level pre-check above handles the common case; this
       // branch covers the race where a sibling request slipped between the
-      // pre-check and the INSERT.
+      // pre-check and the INSERT. Only the specific UNIQUE violation on the
+      // predecessor_deposit_id column maps to DUPLICATE_LINK — other FK,
+      // CHECK, or UNIQUE-on-different-column violations retain the generic
+      // typed failure path.
       if (
         input.predecessorDepositId !== undefined &&
         err instanceof Error &&
-        /UNIQUE.*predecessor_deposit_id|SQLITE_CONSTRAINT/i.test(err.message)
+        /UNIQUE constraint failed: term_deposits\.predecessor_deposit_id/i.test(err.message)
       ) {
         return fail(
           "DUPLICATE_LINK",
