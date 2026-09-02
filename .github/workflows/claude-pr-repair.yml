@@ -1,0 +1,231 @@
+name: Claude PR Repair
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: bankmanage-claude-pr-repair-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  repair:
+    if: >-
+      github.event.issue.pull_request != null &&
+      github.event.comment.body == '/claude-fix' &&
+      github.event.comment.user.login == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and checkout current PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          mkdir -p .agent-task
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > .agent-task/pr.json
+
+          STATE=$(jq -r '.state' .agent-task/pr.json)
+          HEAD_REPO=$(jq -r '.head.repo.full_name' .agent-task/pr.json)
+          HEAD_REF=$(jq -r '.head.ref' .agent-task/pr.json)
+          HEAD_SHA=$(jq -r '.head.sha' .agent-task/pr.json)
+          BASE_REF=$(jq -r '.base.ref' .agent-task/pr.json)
+
+          test "$STATE" = "open" || { echo "PR is not open"; exit 1; }
+          test "$HEAD_REPO" = "$GITHUB_REPOSITORY" || { echo "Fork PR repair is intentionally blocked"; exit 1; }
+          test "$BASE_REF" = "main" || { echo "Only PRs targeting main are supported"; exit 1; }
+          test "$HEAD_REF" != "main" || { echo "Refusing to repair main directly"; exit 1; }
+
+          git fetch origin "${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA" || { echo "PR head changed while resolving"; exit 1; }
+
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "start_head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+
+      - name: Verify MiniMax secret
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          test -n "$MINIMAX_API_KEY" || { echo "MINIMAX_API_KEY is not configured." >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+
+      - name: Build bounded PR repair context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments?per_page=100" > .agent-task/review-comments.json
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" > .agent-task/conversation-comments.json
+          git diff --name-status origin/main...HEAD > .agent-task/changed-files.txt
+
+          {
+            echo "# Existing PR repair task"
+            echo
+            jq -r '"PR #" + (.number|tostring) + ": " + .title + "\n\n" + (.body // "")' .agent-task/pr.json
+            echo
+            echo "## Current PR HEAD"
+            git rev-parse HEAD
+            echo
+            echo "## Changed files"
+            cat .agent-task/changed-files.txt
+            echo
+            echo "## Inline review comments (leads, not truth; verify against current HEAD)"
+            jq -r '.[] | "- [" + (.path // "unknown") + "] " + (.body // "")' .agent-task/review-comments.json | tail -n 80
+            echo
+            echo "## Recent PR conversation"
+            jq -r '.[] | "- " + (.body // "")' .agent-task/conversation-comments.json | tail -n 60
+          } > .agent-task/context.md
+
+      - name: Deterministic validation before repair
+        id: validation_before
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-before.log
+
+      - name: Install pinned Claude Code
+        run: |
+          set -euo pipefail
+          curl -fsSL https://claude.ai/install.sh | bash -s 2.1.237
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+
+      - name: Claude current-PR repair pass
+        env:
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          API_TIMEOUT_MS: "3000000"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"
+          ANTHROPIC_CUSTOM_MODEL_OPTION: MiniMax-M3[1m]
+          ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: MiniMax M3
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
+        run: |
+          set -euo pipefail
+          claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
+            --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
+            --strict-mcp-config --disable-slash-commands --setting-sources project \
+            --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 48 \
+            --no-session-persistence --output-format json \
+            "Repair the existing PR in place. Read .agent-task/context.md and .agent-task/validation-before.log, then inspect only relevant current files plus CLAUDE.md, AGENTS.md, SPEC/ADR sections needed for the blocker. Review comments are leads, not truth: verify every finding against current HEAD and do not resurrect stale findings. Fix current deterministic failures and current semantic blockers with the smallest complete change. Preserve scope, financial/security invariants, and the existing PR branch. Do not create branches/PRs, do not deploy, do not change product scope, and do not run commands. If current code is already correct, make no speculative edits." \
+            > .agent-task/claude-repair.json
+
+      - name: Deterministic validation after repair
+        id: validation_after
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-after.log
+
+      - name: One bounded failure-only repair pass
+        if: steps.validation_after.outcome == 'failure'
+        env:
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          API_TIMEOUT_MS: "3000000"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"
+          ANTHROPIC_CUSTOM_MODEL_OPTION: MiniMax-M3[1m]
+          ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: MiniMax M3
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
+        run: |
+          set -euo pipefail
+          claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
+            --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
+            --strict-mcp-config --disable-slash-commands --setting-sources project \
+            --exclude-dynamic-system-prompt-sections --autocompact 80k --max-turns 20 \
+            --no-session-persistence --output-format json \
+            "Repair only the failures in .agent-task/validation-after.log. Use .agent-task/context.md for PR scope. Fix root cause only, do not broaden scope, do not create branches/PRs, do not deploy, and do not run commands." \
+            > .agent-task/claude-repair-2.json
+
+      - name: Final deterministic validation
+        run: ./scripts/agent-validate.sh
+
+      - name: Commit and push to the same PR branch
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          START_HEAD: ${{ steps.pr.outputs.start_head }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          rm -rf .agent-task
+
+          if git diff --quiet "$START_HEAD" --; then
+            echo "No repository change required after current-head verification." >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin "${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
+          REMOTE_HEAD=$(git rev-parse "refs/remotes/origin/${HEAD_REF}")
+          test "$REMOTE_HEAD" = "$START_HEAD" || {
+            echo "STALE_PR_HEAD: remote head moved from $START_HEAD to $REMOTE_HEAD; refusing to overwrite concurrent work." >&2
+            exit 1
+          }
+
+          git config user.name "bankmanage-claude-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(pr-${PR_NUMBER}): Claude current-head repair"
+
+          NEW_HEAD=$(git rev-parse HEAD)
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${HEAD_REF}"
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "head=$NEW_HEAD" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch independent CI judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF"
+          echo "Independent CI dispatch accepted for ${HEAD_REF}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report repair result on the existing PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          NEW_HEAD: ${{ steps.push.outputs.head }}
+          CHANGED: ${{ steps.push.outputs.changed }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "[BANKMANAGE-CLAUDE-PR-REPAIR] Existing-PR repair completed in place. Repository changes: ${CHANGED}. Current head: \`${NEW_HEAD}\`. Full deterministic validation passed inside the repair workflow, and an independent CI workflow_dispatch was submitted for this same PR branch. No duplicate branch or PR was created. Merge remains blocked until the dispatched CI and current-head semantic review are green."
