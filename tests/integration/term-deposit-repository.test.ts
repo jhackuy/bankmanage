@@ -261,16 +261,18 @@ describe("updateEditableFacts", () => {
         holderMemberId: seeded.memberId,
       })
     );
-    const originalUpdatedAt = created.updatedAt;
-    // SQLite datetime('now') has second-level precision; wait long enough to
-    // cross a second boundary before the next write so the strict greater-than
-    // comparison actually proves the timestamp changed.
-    await new Promise((r) => setTimeout(r, 1100));
+    // Backdate updated_at in SQL so the next write's datetime('now') is
+    // guaranteed to produce a strictly later timestamp without relying on
+    // wall-clock timing or SQLite second-level precision.
+    await db
+      .prepare("UPDATE term_deposits SET updated_at = '2000-01-01 00:00:00' WHERE id = ?")
+      .bind(created.id)
+      .run();
     const updated = await repo.updateEditableFacts(created.id, { principalMinor: 9_000_000 }, [
       "DRAFT",
       "REVIEW_REQUIRED",
     ]);
-    expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(new Date(originalUpdatedAt).getTime());
+    expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(new Date("2000-01-01T00:00:00Z").getTime());
   });
 
   it("rejects a patch once the row has moved to ACTIVE", async () => {
