@@ -325,6 +325,12 @@ jobs:
 
       - name: Enforce final validation outcome
         if: always() && steps.final_validation.outcome != 'success'
+        env:
+          CHANGED: ${{ steps.push.outputs.changed }}
         run: |
-          echo "Final deterministic validation failed; partial progress was preserved on the existing PR branch." >&2
+          if [ "$CHANGED" = "true" ]; then
+            echo "Final deterministic validation failed; partial progress was preserved on the existing PR branch." >&2
+          else
+            echo "Final deterministic validation failed; no repository changes were produced." >&2
+          fi
           exit 1
