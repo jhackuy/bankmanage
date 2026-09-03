@@ -125,8 +125,13 @@ export class ReportsApplicationService {
    * Bank-and-currency rollup across the household. Every active,
    * non-archived account appears once under its bank and currency.
    * `unreconciled` is true when the account has no reconciliation
-   * record OR its most-recent reconciliation has a non-zero
-   * difference (SPEC §8 dashboard requirement).
+   * record OR its current cleared ledger balance no longer matches
+   * the bank-confirmed balance from its most-recent reconciliation
+   * (SPEC §7 / §8: a non-zero difference is displayed and never
+   * silently repaired). The comparison is performed against the live
+   * cleared balance rather than the historical `differenceMinor`
+   * snapshot so a POSTED transaction after reconciliation correctly
+   * flips the account back to unreconciled.
    */
   async getBankCurrencyTotals(requestingMemberId: number): Promise<ServiceResult<BankCurrencyTotals>> {
     const auth = await this.requireOwnerMember(requestingMemberId);
@@ -152,7 +157,14 @@ export class ReportsApplicationService {
         account.currencyCode
       );
       const latest = latestByAccount.get(account.id) ?? null;
-      const unreconciled = latest === null || latest.differenceMinor !== 0;
+      // A reconciled account is one whose current cleared ledger
+      // balance equals the bank-confirmed balance recorded at the
+      // latest reconciliation. Any POSTED transaction after that
+      // reconciliation moves `cleared` and therefore flips
+      // `unreconciled` back to true. Using the historical
+      // `differenceMinor` would freeze the flag at reconciliation
+      // time and silently mask new activity.
+      const unreconciled = latest === null || cleared !== latest.bankConfirmedBalanceMinor;
       totals.push({ account, clearedBalanceMinor: cleared, latestReconciliation: latest, unreconciled });
     }
 

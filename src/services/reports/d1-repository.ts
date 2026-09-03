@@ -154,15 +154,29 @@ export class D1ReportsRepository implements ReportsRepository {
     // structural signal that distinguishes INCOME/EXPENSE from TRANSFER
     // (transfers have two account-side entries, no category-side entry).
     //
-    // The SUM is over the category-side amount_minor only, which equals
-    // the transaction's amount_minor (the two sides balance). Filtering
-    // on `state = 'POSTED'` excludes REVERSED headers. Grouping by both
-    // transaction_type and currency_code keeps the two streams separate.
+    // The SUM is direction-signed: the "positive" direction on the
+    // category side depends on the transaction type. An original INCOME
+    // posts a category-side CREDIT (positive income); its reversal flips
+    // the entry to DEBIT, which must subtract. An original EXPENSE posts
+    // a category-side DEBIT (positive expense); its reversal flips the
+    // entry to CREDIT, which must subtract. Summing raw amount_minor
+    // would add the reversal instead of negating the original, inflating
+    // both income and expense. The CASE expression keeps originals
+    // positive and reversals negative so a reversal pair sums to zero.
+    // Filtering on `state = 'POSTED'` excludes REVERSED headers. Grouping
+    // by both transaction_type and currency_code keeps the two streams
+    // separate.
     const result = await this.db
       .prepare(
         `SELECT t.transaction_type AS transaction_type,
                 t.currency_code     AS currency_code,
-                SUM(e.amount_minor) AS total_minor
+                SUM(
+                  CASE
+                    WHEN t.transaction_type = 'EXPENSE' AND e.direction = 'DEBIT'  THEN e.amount_minor
+                    WHEN t.transaction_type = 'INCOME'  AND e.direction = 'CREDIT' THEN e.amount_minor
+                    ELSE -e.amount_minor
+                  END
+                ) AS total_minor
            FROM transactions t
            JOIN ledger_entries e ON e.transaction_id = t.id
           WHERE t.state = 'POSTED'
@@ -188,6 +202,10 @@ export class D1ReportsRepository implements ReportsRepository {
           `aggregateMonthlyIncomeExpense: total ${total} for ${row.currency_code} is outside the safe-integer range`
         );
       }
+      // A reversal pair cancels to zero via direction-signed SUM; that
+      // bucket has nothing to display and is dropped so the dashboard
+      // shows only non-zero per-currency totals.
+      if (total === 0) continue;
       const entry: CurrencyAmount = { currencyCode: row.currency_code, amountMinor: total };
       if (row.transaction_type === "INCOME") {
         incomeByCurrency.push(entry);
@@ -202,17 +220,22 @@ export class D1ReportsRepository implements ReportsRepository {
     fromDate: string,
     toDate: string
   ): Promise<readonly ExpenseCategoryBreakdownRow[]> {
-    // One row per (category, currency). Sum the category-side amount,
-    // count distinct transactions. The `c.active = 1` predicate keeps
-    // inactive categories from appearing even when a historical expense
-    // still references them — the breakdown is for live display, the
-    // ledger fact is preserved.
+    // One row per (category, currency). The category-side SUM is
+    // direction-signed: an original EXPENSE posts a category-side DEBIT
+    // (positive expense); its reversal flips the entry to CREDIT, which
+    // must subtract so the reversal pair sums to zero. The `c.active`
+    // column is intentionally NOT filtered — historical expenses posted
+    // against a category that has since been deactivated must still
+    // appear in the breakdown, otherwise deactivating a category would
+    // erase already-posted amounts from the dashboard.
     const result = await this.db
       .prepare(
         `SELECT e.category_id              AS category_id,
                 c.name                     AS category_name,
                 t.currency_code            AS currency_code,
-                SUM(e.amount_minor)        AS total_amount_minor,
+                SUM(
+                  CASE WHEN e.direction = 'DEBIT' THEN e.amount_minor ELSE -e.amount_minor END
+                )                          AS total_amount_minor,
                 COUNT(DISTINCT t.id)       AS transaction_count
            FROM transactions t
            JOIN ledger_entries e ON e.transaction_id = t.id
@@ -220,7 +243,6 @@ export class D1ReportsRepository implements ReportsRepository {
           WHERE t.state = 'POSTED'
             AND t.transaction_type = 'EXPENSE'
             AND e.category_id IS NOT NULL
-            AND c.active = 1
             AND t.occurred_on >= ?
             AND t.occurred_on <  ?
           GROUP BY e.category_id, c.name, t.currency_code
@@ -228,13 +250,15 @@ export class D1ReportsRepository implements ReportsRepository {
       )
       .bind(fromDate, toDate)
       .all<CategoryRollupRow>();
-    return result.results.map((row) => ({
-      categoryId: row.category_id,
-      categoryName: row.category_name,
-      currencyCode: row.currency_code,
-      totalAmountMinor: Number(row.total_amount_minor),
-      transactionCount: row.transaction_count,
-    }));
+    return result.results
+      .map((row) => ({
+        categoryId: row.category_id,
+        categoryName: row.category_name,
+        currencyCode: row.currency_code,
+        totalAmountMinor: Number(row.total_amount_minor),
+        transactionCount: row.transaction_count,
+      }))
+      .filter((row) => row.totalAmountMinor !== 0);
   }
 
   async listActiveAccounts(): Promise<readonly AccountRecord[]> {

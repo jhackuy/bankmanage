@@ -93,7 +93,7 @@ export interface AccountTotal {
   readonly clearedBalanceMinor: number;
   /** Latest reconciliation record, or null when the account has never been reconciled. */
   readonly latestReconciliation: ReconciliationRecord | null;
-  /** True when the account has no reconciliation or its latest difference is non-zero. */
+  /** True when the account has no reconciliation, or its current cleared ledger balance no longer matches the bank-confirmed balance from its latest reconciliation. */
   readonly unreconciled: boolean;
 }
 

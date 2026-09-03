@@ -23,8 +23,9 @@
  *   - Bank/account totals: accounts grouped by (bankId, currency),
  *     with cleared balance and latest reconciliation status.
  *   - Reconciliation status: the unreconciled flag is true when
- *     the account has no reconciliation OR its latest difference
- *     is non-zero.
+ *     the account has no reconciliation OR its current cleared
+ *     balance no longer matches the bank-confirmed balance from
+ *     its latest reconciliation.
  *   - Recent ordering: POSTED transactions only, ordered by
  *     occurred_on DESC, id DESC.
  *   - OWNER-only access: a MEMBER caller is rejected with
@@ -356,6 +357,76 @@ async function postTransaction(
   return txnId;
 }
 
+/**
+ * Post a reversal transaction whose category-side entry has the
+ * OPPOSITE direction from a standard original. This mirrors what the
+ * transactions service does via `mirrorEntryForReversal`: an original
+ * EXPENSE's category-side DEBIT becomes a CREDIT on the reversal,
+ * and an original INCOME's category-side CREDIT becomes a DEBIT.
+ * The account-side entry direction is flipped for symmetry so the
+ * reversal transaction itself is balanced.
+ */
+async function postReversalWithFlippedDirections(
+  type: "INCOME" | "EXPENSE",
+  memberId: number,
+  accountId: number,
+  categoryId: number,
+  amountMinor: number,
+  currencyCode: string,
+  occurredOn: string,
+  idempotencyKey: string
+): Promise<number> {
+  const txn = await db
+    .prepare(
+      `INSERT INTO transactions (transaction_type, member_id, currency_code,
+                                  amount_minor, occurred_on, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .bind(type, memberId, currencyCode, amountMinor, occurredOn, idempotencyKey)
+    .run();
+  const txnId = Number(txn.meta.last_row_id);
+  if (type === "INCOME") {
+    // Original INCOME: account DEBIT, category CREDIT.
+    // Reversal: account CREDIT, category DEBIT (flipped).
+    await db
+      .prepare(
+        `INSERT INTO ledger_entries (transaction_id, account_id, category_id, direction,
+                                     amount_minor, currency_code)
+         VALUES (?, ?, NULL, 'CREDIT', ?, ?)`
+      )
+      .bind(txnId, accountId, amountMinor, currencyCode)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO ledger_entries (transaction_id, account_id, category_id, direction,
+                                     amount_minor, currency_code)
+         VALUES (?, NULL, ?, 'DEBIT', ?, ?)`
+      )
+      .bind(txnId, categoryId, amountMinor, currencyCode)
+      .run();
+  } else {
+    // Original EXPENSE: account CREDIT, category DEBIT.
+    // Reversal: account DEBIT, category CREDIT (flipped).
+    await db
+      .prepare(
+        `INSERT INTO ledger_entries (transaction_id, account_id, category_id, direction,
+                                     amount_minor, currency_code)
+         VALUES (?, ?, NULL, 'DEBIT', ?, ?)`
+      )
+      .bind(txnId, accountId, amountMinor, currencyCode)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO ledger_entries (transaction_id, account_id, category_id, direction,
+                                     amount_minor, currency_code)
+         VALUES (?, NULL, ?, 'CREDIT', ?, ?)`
+      )
+      .bind(txnId, categoryId, amountMinor, currencyCode)
+      .run();
+  }
+  return txnId;
+}
+
 // ── Monthly income/expense/net ─────────────────────────────────────────────
 
 describe("getMonthlyIncomeExpenseNet", () => {
@@ -537,6 +608,65 @@ describe("getMonthlyIncomeExpenseNet", () => {
     if (!r.ok) return;
     expect(r.value.incomeByCurrency).toEqual([{ currencyCode: "PHP", amountMinor: 10_000 }]);
     expect(r.value.expenseByCurrency).toEqual([{ currencyCode: "PHP", amountMinor: 10_000 }]);
+  });
+
+  it("signs reversal entries from category-side direction so a reversal pair sums to zero", async () => {
+    const s = await loadSeed();
+    // Production-path regression: the reversal service creates a new
+    // POSTED transaction whose category-side entry has the FLIPPED
+    // direction from the original. Without direction-based SUM, both
+    // rows would contribute +10_000 and the aggregate would double-count
+    // the reversal as additional income/expense. With direction-based
+    // SUM the reversal's category-side entry carries the opposite sign
+    // and the pair cancels to zero.
+    await postTransaction(
+      "INCOME",
+      s.ownerId,
+      s.accountA1,
+      null,
+      s.incomeSalaryId,
+      10_000,
+      "PHP",
+      "2026-10-01",
+      "k-pair-inc-orig"
+    );
+    await postReversalWithFlippedDirections(
+      "INCOME",
+      s.ownerId,
+      s.accountA1,
+      s.incomeSalaryId,
+      10_000,
+      "PHP",
+      "2026-10-02",
+      "k-pair-inc-rev"
+    );
+    await postTransaction(
+      "EXPENSE",
+      s.ownerId,
+      s.accountA1,
+      null,
+      s.expenseGroceriesId,
+      7_500,
+      "PHP",
+      "2026-10-03",
+      "k-pair-exp-orig"
+    );
+    await postReversalWithFlippedDirections(
+      "EXPENSE",
+      s.ownerId,
+      s.accountA1,
+      s.expenseGroceriesId,
+      7_500,
+      "PHP",
+      "2026-10-04",
+      "k-pair-exp-rev"
+    );
+    const r = await service.getMonthlyIncomeExpenseNet(s.ownerId, "2026-10-01", "2026-11-01");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Each reversal pair sums to zero via direction-based SUM.
+    expect(r.value.incomeByCurrency).toEqual([]);
+    expect(r.value.expenseByCurrency).toEqual([]);
   });
 
   it("returns empty buckets for an empty month", async () => {
@@ -768,11 +898,13 @@ describe("getExpenseCategoryBreakdown", () => {
     expect(r.value.rows[0]?.totalAmountMinor).toBe(10_000);
   });
 
-  it("excludes inactive categories even when ledger entries reference them", async () => {
+  it("retains inactive categories for historical expense breakdown", async () => {
     const s = await loadSeed();
-    // Deactivate a category after the transaction is posted; the breakdown
-    // must drop it (the breakdown is for live display, the ledger is
-    // preserved).
+    // A category deactivated after the expense was posted must still
+    // appear in the breakdown. The ledger fact is preserved; the
+    // breakdown reports on what was already posted, not only what is
+    // currently active. Filtering out deactivated categories would
+    // erase already-recorded amounts from the dashboard.
     await postTransaction(
       "EXPENSE",
       s.ownerId,
@@ -786,6 +918,42 @@ describe("getExpenseCategoryBreakdown", () => {
     );
     await db.prepare("UPDATE categories SET active = 0 WHERE id = ?").bind(s.expenseDiningId).run();
     const r = await service.getExpenseCategoryBreakdown(s.ownerId, "2026-09-01", "2026-10-01");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.rows).toHaveLength(1);
+    expect(r.value.rows[0]?.categoryId).toBe(s.expenseDiningId);
+    expect(r.value.rows[0]?.totalAmountMinor).toBe(5_000);
+    expect(r.value.rows[0]?.transactionCount).toBe(1);
+  });
+
+  it("signs reversal entries from category-side direction in the expense breakdown", async () => {
+    const s = await loadSeed();
+    // Production-path regression for the expense breakdown: an original
+    // EXPENSE + its flipped-direction reversal must cancel to zero in
+    // the per-category total. Without direction-based SUM the breakdown
+    // would double-count the reversal as additional expense.
+    await postTransaction(
+      "EXPENSE",
+      s.ownerId,
+      s.accountA1,
+      null,
+      s.expenseGroceriesId,
+      10_000,
+      "PHP",
+      "2026-10-01",
+      "k-bk-rev-orig"
+    );
+    await postReversalWithFlippedDirections(
+      "EXPENSE",
+      s.ownerId,
+      s.accountA1,
+      s.expenseGroceriesId,
+      10_000,
+      "PHP",
+      "2026-10-02",
+      "k-bk-rev-flip"
+    );
+    const r = await service.getExpenseCategoryBreakdown(s.ownerId, "2026-10-01", "2026-11-01");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.rows).toEqual([]);
@@ -900,6 +1068,71 @@ describe("getBankCurrencyTotals", () => {
     const group = r.value.byBankAndCurrency.find((g) => g.bankId === s.bankAId && g.currencyCode === "PHP");
     const a1 = group?.accounts.find((a) => a.account.id === s.accountA1);
     expect(a1?.unreconciled).toBe(true);
+  });
+
+  it("flips a reconciled account to unreconciled when a POSTED transaction moves the cleared balance", async () => {
+    const s = await loadSeed();
+    // Production-path regression: the unreconciled flag must compare
+    // the CURRENT cleared ledger balance with the bank-confirmed
+    // balance from the latest reconciliation, NOT the historical
+    // difference_minor snapshot. A POSTED transaction after the
+    // reconciliation changes the cleared balance and therefore must
+    // flip the account back to unreconciled.
+    await postTransaction(
+      "INCOME",
+      s.ownerId,
+      s.accountA1,
+      null,
+      s.incomeSalaryId,
+      20_000,
+      "PHP",
+      "2026-03-05",
+      "k-bt-post-1"
+    );
+    await db
+      .prepare(
+        `INSERT INTO account_reconciliations (
+           account_id, member_id, currency_code,
+           bank_confirmed_balance_minor, cleared_balance_minor, difference_minor,
+           confirmed_at, idempotency_key, currency_declared
+         ) VALUES (?, ?, 'PHP', ?, ?, 0, '2026-03-31T10:00:00.000Z', 'k-bt-recon-clean', 0)`
+      )
+      .bind(s.accountA1, s.ownerId, 20_000, 20_000)
+      .run();
+    // Sanity: the account is reconciled at this point.
+    const r1 = await service.getBankCurrencyTotals(s.ownerId);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const group1 = r1.value.byBankAndCurrency.find((g) => g.bankId === s.bankAId && g.currencyCode === "PHP");
+    const a1Before = group1?.accounts.find((a) => a.account.id === s.accountA1);
+    expect(a1Before?.clearedBalanceMinor).toBe(20_000);
+    expect(a1Before?.unreconciled).toBe(false);
+
+    // Post another transaction AFTER the reconciliation. The cleared
+    // balance moves; the bank-confirmed balance does not. The
+    // historical difference_minor is still 0, but the account is no
+    // longer reconciled because the live cleared balance no longer
+    // matches the bank-confirmed balance.
+    await postTransaction(
+      "EXPENSE",
+      s.ownerId,
+      s.accountA1,
+      null,
+      s.expenseGroceriesId,
+      3_000,
+      "PHP",
+      "2026-04-05",
+      "k-bt-post-2"
+    );
+    const r2 = await service.getBankCurrencyTotals(s.ownerId);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    const group2 = r2.value.byBankAndCurrency.find((g) => g.bankId === s.bankAId && g.currencyCode === "PHP");
+    const a1After = group2?.accounts.find((a) => a.account.id === s.accountA1);
+    expect(a1After?.clearedBalanceMinor).toBe(17_000);
+    expect(a1After?.latestReconciliation?.bankConfirmedBalanceMinor).toBe(20_000);
+    expect(a1After?.latestReconciliation?.differenceMinor).toBe(0);
+    expect(a1After?.unreconciled).toBe(true);
   });
 
   it("excludes archived and inactive accounts from the rollup", async () => {
