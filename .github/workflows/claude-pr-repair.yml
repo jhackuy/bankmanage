@@ -316,8 +316,10 @@ jobs:
           set -euo pipefail
           if [ "${{ steps.final_validation.outcome }}" = "success" ]; then
             RESULT="Full deterministic validation passed; independent CI was dispatched from trusted main for this exact SHA."
-          else
+          elif [ "$CHANGED" = "true" ]; then
             RESULT="Partial repair progress was preserved on the same PR branch, but final deterministic validation failed. Independent CI was not dispatched and merge remains blocked."
+          else
+            RESULT="Final deterministic validation failed and no repository changes were produced. Independent CI was not dispatched and merge remains blocked."
           fi
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "[BANKMANAGE-CLAUDE-PR-REPAIR] Existing-PR repair completed in place. Repository changes: ${CHANGED}. Current head: \`${NEW_HEAD}\`. ${RESULT} No duplicate branch or PR was created."
 
