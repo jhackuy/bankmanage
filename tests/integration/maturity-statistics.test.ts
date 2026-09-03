@@ -248,6 +248,26 @@ describe("computeWindow — single window", () => {
     if (r.ok) return;
     expect(r.error.code).toBe("INVALID_INPUT");
   });
+
+  it("rejects an impossible calendar today without throwing (computeWindow)", async () => {
+    // "2026-02-30" passes the ISO layout regex but is not a real UTC day.
+    // The service boundary must return a typed failure, never throw.
+    for (const bad of ["2026-02-30", "2026-99-99", "2026-13-01", "2025-02-29"]) {
+      const r = await statsService.computeWindow(bad, 30);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.code).toBe("INVALID_INPUT");
+    }
+  });
+
+  it("rejects an impossible calendar today without throwing (computeAllWindows)", async () => {
+    for (const bad of ["2026-02-30", "2026-99-99", "2026-00-10", "2026-04-31"]) {
+      const r = await statsService.computeAllWindows(bad);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.code).toBe("INVALID_INPUT");
+    }
+  });
 });
 
 // ── SPEC §4.1 regression vector through statistics ────────────────────────

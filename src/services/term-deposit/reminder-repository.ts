@@ -19,20 +19,36 @@
 
 import type { ReminderOffsetKind, ReminderRecord } from "../../domain/term-deposit/index.js";
 
+/**
+ * Result of an idempotent reminder upsert.
+ *
+ * `created` comes from the database WRITE result of this call, not from a
+ * prior read. That makes it race-safe: when two scanners ensure the same
+ * (deposit_id, offset_kind) concurrently, exactly one of them observes
+ * `created: true`, so downstream delivery can never be triggered twice for
+ * the same logical reminder.
+ */
+export interface EnsureReminderResult {
+  readonly record: ReminderRecord;
+  readonly created: boolean;
+}
+
 export interface ReminderRepository {
   /**
    * Idempotently ensure a reminder row exists for (depositId, offsetKind)
    * with the given targetDate. If a row already exists, it is returned
-   * unchanged; if not, it is inserted in PENDING status.
+   * unchanged with `created: false`; if not, it is inserted in PENDING
+   * status and returned with `created: true`.
    *
    * The UNIQUE (deposit_id, offset_kind) constraint is the race-safe
-   * boundary: concurrent scans cannot create duplicates.
+   * boundary: concurrent scans cannot create duplicates, and only the
+   * caller whose INSERT actually wrote the row sees `created: true`.
    */
   ensureReminder(
     depositId: number,
     offsetKind: ReminderOffsetKind,
     targetDate: string
-  ): Promise<ReminderRecord>;
+  ): Promise<EnsureReminderResult>;
 
   /** SELECT all reminders for a deposit, ordered by target_date ASC. */
   listByDeposit(depositId: number): Promise<ReminderRecord[]>;

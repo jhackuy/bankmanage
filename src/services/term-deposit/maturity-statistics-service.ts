@@ -78,9 +78,10 @@ interface MutableCurrencyAcc {
  * Bigint-safe monetary total. If the per-currency sum exceeds
  * Number.MAX_SAFE_INTEGER, the conversion to `number` would silently
  * corrupt the value. Callers must check the returned boolean before
- * using the numeric representation.
+ * using the numeric representation. This is a range check, not a type
+ * guard: the argument is always a bigint.
  */
-function bigintToSafeNumber(n: bigint): n is bigint {
+function isSafeNumberRange(n: bigint): boolean {
   return n >= -NUMBER_MAX_SAFE_INTEGER && n <= NUMBER_MAX_SAFE_INTEGER;
 }
 
@@ -146,11 +147,11 @@ function aggregateWindow(
   const byCurrency: MaturityWindowCurrencyStats[] = [];
   for (const [currencyCode, v] of acc.entries()) {
     if (
-      !bigintToSafeNumber(v.totalPrincipalMinor) ||
-      !bigintToSafeNumber(v.totalGrossInterestMinor) ||
-      !bigintToSafeNumber(v.totalTaxMinor) ||
-      !bigintToSafeNumber(v.totalNetInterestMinor) ||
-      !bigintToSafeNumber(v.totalMaturityAmountMinor)
+      !isSafeNumberRange(v.totalPrincipalMinor) ||
+      !isSafeNumberRange(v.totalGrossInterestMinor) ||
+      !isSafeNumberRange(v.totalTaxMinor) ||
+      !isSafeNumberRange(v.totalNetInterestMinor) ||
+      !isSafeNumberRange(v.totalMaturityAmountMinor)
     ) {
       return fail(
         "OVERFLOW",
@@ -262,6 +263,13 @@ export class MaturityStatisticsService {
 
 // ── Pure validators ─────────────────────────────────────────────────────────
 
+/**
+ * Strict external-date validation for `today`. The regex only proves the
+ * layout, so the value must also round-trip through `Date.UTC` to reject
+ * impossible calendar days such as `2026-02-30` or `2026-99-99`. The
+ * service boundary never throws: a bad input becomes a typed
+ * INVALID_INPUT failure.
+ */
 function validateToday(today: string): ServiceResult<true> {
   if (typeof today !== "string" || !ISO_DATE_PATTERN.test(today)) {
     return {
@@ -269,7 +277,17 @@ function validateToday(today: string): ServiceResult<true> {
       error: { code: "INVALID_INPUT", message: "today must be ISO YYYY-MM-DD" },
     };
   }
-  parseIsoDateUtc(today);
+  try {
+    parseIsoDateUtc(today);
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_INPUT",
+        message: `today must be a real UTC calendar date: ${today}`,
+      },
+    };
+  }
   return { ok: true, value: true };
 }
 

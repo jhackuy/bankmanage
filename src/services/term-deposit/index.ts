@@ -31,7 +31,7 @@ export {
   ok,
 } from "./types.js";
 
-export { type ReminderRepository } from "./reminder-repository.js";
+export { type EnsureReminderResult, type ReminderRepository } from "./reminder-repository.js";
 export { D1ReminderRepository } from "./d1-reminder-repository.js";
 export { TermDepositReminderService, type ScanResult } from "./reminder-service.js";
 

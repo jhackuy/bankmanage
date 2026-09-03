@@ -153,6 +153,64 @@ describe("scanAll idempotency", () => {
     expect(scan.value.ensured).toHaveLength(0);
     expect(scan.value.createdIds).toHaveLength(0);
   });
+
+  it("createdIds excludes a reminder row inserted by another writer", async () => {
+    // Simulate a concurrent scanner (or an earlier partial scan) that already
+    // persisted the D0 reminder for this deposit. Only the three rows this
+    // scan actually inserts may appear in createdIds, otherwise a delivery
+    // step would double-send the D0 reminder.
+    const depositId = await createActiveDeposit({ maturityDate: "2026-04-01" });
+    await db
+      .prepare(
+        `INSERT INTO term_deposit_reminders (deposit_id, offset_kind, target_date)
+         VALUES (?, 'D0', '2026-04-01')`
+      )
+      .bind(depositId)
+      .run();
+    const preExisting = await db
+      .prepare("SELECT id FROM term_deposit_reminders WHERE deposit_id = ? AND offset_kind = 'D0'")
+      .bind(depositId)
+      .first<{ id: number }>();
+    expect(preExisting).not.toBeNull();
+
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    if (!scan.ok) return;
+    expect(scan.value.ensured).toHaveLength(4);
+    expect(scan.value.createdIds).toHaveLength(3);
+    expect(scan.value.createdIds).not.toContain(preExisting!.id);
+
+    // Still exactly four logical reminders for the deposit.
+    const count = await db
+      .prepare("SELECT COUNT(*) as cnt FROM term_deposit_reminders WHERE deposit_id = ?")
+      .bind(depositId)
+      .first<{ cnt: number }>();
+    expect(count?.cnt).toBe(4);
+  });
+
+  it("ensureReminder reports created=true only for the call that inserted the row", async () => {
+    const depositId = await createActiveDeposit({ maturityDate: "2026-04-01" });
+    const repo = new D1ReminderRepository(db);
+
+    const first = await repo.ensureReminder(depositId, "D_MINUS_7", "2026-03-25");
+    expect(first.created).toBe(true);
+    expect(first.record.targetDate).toBe("2026-03-25");
+
+    const second = await repo.ensureReminder(depositId, "D_MINUS_7", "2026-03-25");
+    expect(second.created).toBe(false);
+    expect(second.record.id).toBe(first.record.id);
+  });
+
+  it("does not issue a per-offset existing-reminder query", async () => {
+    // Guard against reintroducing a pre-read per offset. One deposit needs:
+    // 1 deposit listing + (INSERT + SELECT) per offset = 1 + 4*2 = 9
+    // prepared statements. Anything above that means extra reads crept back.
+    await createActiveDeposit({ maturityDate: "2026-04-01" });
+    const before = db.statementCount;
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    expect(db.statementCount - before).toBeLessThanOrEqual(9);
+  });
 });
 
 // ── scan recovery after outage ─────────────────────────────────────────────

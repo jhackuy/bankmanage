@@ -11,7 +11,7 @@
 
 import type { D1Database } from "../../adapters/d1/types.js";
 import type { ReminderOffsetKind, ReminderRecord, ReminderStatus } from "../../domain/term-deposit/index.js";
-import type { ReminderRepository } from "./reminder-repository.js";
+import type { EnsureReminderResult, ReminderRepository } from "./reminder-repository.js";
 
 // ── Row type as stored in SQLite ────────────────────────────────────────────
 
@@ -52,12 +52,12 @@ export class D1ReminderRepository implements ReminderRepository {
     depositId: number,
     offsetKind: ReminderOffsetKind,
     targetDate: string
-  ): Promise<ReminderRecord> {
+  ): Promise<EnsureReminderResult> {
     // INSERT OR IGNORE then SELECT — the race-safe idempotency boundary.
     // SQLite's INSERT OR IGNORE on the UNIQUE (deposit_id, offset_kind)
     // constraint leaves a duplicate attempt as a no-op, so the subsequent
     // SELECT always returns exactly one row.
-    await this.db
+    const write = await this.db
       .prepare(
         `INSERT OR IGNORE INTO term_deposit_reminders
            (deposit_id, offset_kind, target_date)
@@ -65,6 +65,11 @@ export class D1ReminderRepository implements ReminderRepository {
       )
       .bind(depositId, offsetKind, targetDate)
       .run();
+    // `created` is derived from the WRITE result: the UNIQUE constraint makes
+    // changes=1 mean "this statement inserted the row" and changes=0 mean
+    // "another writer already owns it". A pre-read cannot give this answer
+    // because a concurrent scanner may insert between read and write.
+    const created = (write.meta.changes ?? 0) > 0;
     const row = await this.db
       .prepare(
         `SELECT * FROM term_deposit_reminders
@@ -80,7 +85,7 @@ export class D1ReminderRepository implements ReminderRepository {
         `ensureReminder: row missing after INSERT OR IGNORE for deposit=${depositId} offset=${offsetKind}`
       );
     }
-    return rowToRecord(row);
+    return { record: rowToRecord(row), created };
   }
 
   async listByDeposit(depositId: number): Promise<ReminderRecord[]> {

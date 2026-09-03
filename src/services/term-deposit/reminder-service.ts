@@ -59,6 +59,11 @@ function assertValidCalendarDate(date: string, field: string): string | null {
 export interface ScanResult {
   readonly scanned: number;
   readonly ensured: ReminderRecord[];
+  /**
+   * Ids of the reminders this scan actually inserted, taken from the
+   * database write result. Safe to hand to a delivery step: a concurrent
+   * scanner never reports the same id.
+   */
   readonly createdIds: readonly number[];
 }
 
@@ -73,6 +78,11 @@ export class TermDepositReminderService {
    * (D-30, D-7, D-1, D0) exist. Idempotent: repeated calls do not create
    * duplicates; the UNIQUE (deposit_id, offset_kind) constraint is the
    * race-safe boundary.
+   *
+   * `createdIds` contains only the reminders whose INSERT actually wrote a
+   * row in THIS call, as reported by the repository write result. No
+   * pre-read is performed, so two scanners running concurrently can never
+   * both report the same reminder as created (which would double-deliver).
    *
    * Recovery: if the caller is running late (e.g. after a temporary
    * outage), a missing D-30 row is still created — the logical fact
@@ -95,14 +105,10 @@ export class TermDepositReminderService {
       scanned++;
       for (const offsetKind of REMINDER_OFFSET_KINDS) {
         const targetDate = computeTargetDate(deposit.maturityDate, offsetKind);
-        // Fetch existing row first so we can tell whether this call
-        // actually persisted a new row or just confirmed an existing one.
-        const existing = await this.reminderRepo.listByDeposit(deposit.id);
-        const existingRow = existing.find((r) => r.offsetKind === offsetKind);
-        const record = await this.reminderRepo.ensureReminder(deposit.id, offsetKind, targetDate);
-        ensured.push(record);
-        if (existingRow === undefined) {
-          createdIds.push(record.id);
+        const result = await this.reminderRepo.ensureReminder(deposit.id, offsetKind, targetDate);
+        ensured.push(result.record);
+        if (result.created) {
+          createdIds.push(result.record.id);
         }
       }
     }
