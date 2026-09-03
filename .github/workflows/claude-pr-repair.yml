@@ -142,7 +142,7 @@ jobs:
           CLAUDE_SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-repair.json 2>/dev/null || true)
           if [ "$CLAUDE_STATUS" -ne 0 ] &&
              [ "$CLAUDE_SUBTYPE" = "error_max_turns" ] &&
-             [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+             [ -n "$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**')" ]; then
             echo "::warning::Claude reached max turns after producing repository changes; continuing to deterministic validation."
             CLAUDE_STATUS=0
           fi
@@ -215,7 +215,7 @@ jobs:
           CLAUDE_SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-repair-2.json 2>/dev/null || true)
           if [ "$CLAUDE_STATUS" -ne 0 ] &&
              [ "$CLAUDE_SUBTYPE" = "error_max_turns" ] &&
-             [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+             [ -n "$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**')" ]; then
             echo "::warning::Claude failure-only pass reached max turns after producing repository changes; continuing to final validation."
             CLAUDE_STATUS=0
           fi
