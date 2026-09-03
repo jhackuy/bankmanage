@@ -115,4 +115,16 @@ describe("isReminderDue", () => {
   it("rejects malformed target_date", () => {
     expect(() => isReminderDue("not-a-date", "2026-04-01")).toThrow();
   });
+
+  it("rejects impossible calendar today (regex-pass but not a real date)", () => {
+    expect(() => isReminderDue("2026-04-01", "2026-99-99")).toThrow();
+    expect(() => isReminderDue("2026-04-01", "2026-02-30")).toThrow();
+    expect(() => isReminderDue("2026-04-01", "2026-13-01")).toThrow();
+  });
+
+  it("rejects impossible calendar target_date (regex-pass but not a real date)", () => {
+    expect(() => isReminderDue("2026-99-99", "2026-04-01")).toThrow();
+    expect(() => isReminderDue("2026-02-30", "2026-04-01")).toThrow();
+    expect(() => isReminderDue("2026-13-01", "2026-04-01")).toThrow();
+  });
 });

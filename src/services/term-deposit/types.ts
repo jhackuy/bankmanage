@@ -152,6 +152,7 @@ export type ServiceErrorCode =
   | "ILLEGAL_TRANSITION"
   | "STALE_STATE"
   | "DUPLICATE_LINK"
+  | "OVERFLOW"
   | "INTERNAL";
 
 export function serviceError(code: ServiceErrorCode, message: string): ServiceError {

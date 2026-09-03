@@ -26,6 +26,36 @@ import type { TermDepositRepository } from "./repository.js";
 import type { ReminderRepository } from "./reminder-repository.js";
 import { fail, ok, type ServiceResult, type TermDepositRecord } from "./types.js";
 
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Strict UTC calendar validation for external date inputs. Rejects strings
+ * that match the ISO layout but do not name a real calendar day (e.g.
+ * `2026-99-99`) by round-tripping through `Date.UTC`.
+ */
+function parseIsoDateUtc(s: string): Date {
+  if (typeof s !== "string" || !ISO_DATE_PATTERN.test(s)) {
+    throw new Error(`Invalid ISO date (expected YYYY-MM-DD): ${s}`);
+  }
+  const year = Number(s.slice(0, 4));
+  const month = Number(s.slice(5, 7));
+  const day = Number(s.slice(8, 10));
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    throw new Error(`Invalid calendar date: ${s}`);
+  }
+  return parsed;
+}
+
+function assertValidCalendarDate(date: string, field: string): string | null {
+  try {
+    parseIsoDateUtc(date);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : `Invalid ${field}: ${date}`;
+  }
+}
+
 export interface ScanResult {
   readonly scanned: number;
   readonly ensured: ReminderRecord[];
@@ -89,6 +119,10 @@ export class TermDepositReminderService {
     if (typeof fromDate !== "string" || typeof toDate !== "string") {
       return fail("INVALID_INPUT", "fromDate and toDate must be ISO YYYY-MM-DD strings");
     }
+    const fromErr = assertValidCalendarDate(fromDate, "fromDate");
+    if (fromErr !== null) return fail("INVALID_INPUT", fromErr);
+    const toErr = assertValidCalendarDate(toDate, "toDate");
+    if (toErr !== null) return fail("INVALID_INPUT", toErr);
     if (fromDate > toDate) {
       return fail("INVALID_INPUT", "fromDate must not be after toDate");
     }

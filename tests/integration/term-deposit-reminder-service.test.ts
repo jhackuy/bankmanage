@@ -379,4 +379,18 @@ describe("listDue", () => {
     if (r.ok) return;
     expect(r.error.code).toBe("INVALID_INPUT");
   });
+
+  it("rejects impossible calendar fromDate (regex-pass but not a real date)", async () => {
+    const r = await reminderService.listDue("2026-99-99", "2026-04-01");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
+
+  it("rejects impossible calendar toDate (regex-pass but not a real date)", async () => {
+    const r = await reminderService.listDue("2026-04-01", "2026-02-30");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
 });

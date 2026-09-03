@@ -1,21 +1,28 @@
 /**
  * Maturity statistics application service.
  *
- * Computes the 30/60/90-day maturity windows per SPEC §8. The computation
+ * Computes the 30/60/90-day maturity horizons per SPEC §8. The computation
  * is deterministic and currency-safe: each currency is aggregated
  * independently, never summed across currencies.
  *
- * Window semantics (non-overlapping):
+ * Window semantics (cumulative horizons from `today`, exclusive upper bound):
  *   [today, today+30d)  -> days30
- *   [today+30d, today+60d) -> days60
- *   [today+60d, today+90d) -> days90
+ *   [today, today+60d)  -> days60  (includes everything in days30)
+ *   [today, today+90d)  -> days90  (includes everything in days60)
+ *
+ * A deposit maturing exactly on an upper bound (e.g. today+30d, today+60d)
+ * falls outside that horizon. The three horizons are cumulative so the
+ * dashboard can render "maturing in the next 30 / 60 / 90 days" without
+ * double-counting; a deposit at 45 days appears in both days60 and days90.
  *
  * Only ACTIVE deposits are counted — DRAFT/REVIEW_REQUIRED are not yet
  * locked in, and post-maturity states are no longer "upcoming".
  *
  * The deterministic estimate comes from the M1A calculator (BigInt
- * fixed-point arithmetic). No JavaScript binary floating point is used
- * for money or rate arithmetic.
+ * fixed-point arithmetic). Aggregation uses bigint internally to avoid
+ * JavaScript `number` overflow when several deposits each close to
+ * Number.MAX_SAFE_INTEGER are summed; a typed `OVERFLOW` failure is
+ * returned if a per-currency total cannot be represented safely.
  */
 
 import {
@@ -29,10 +36,11 @@ import type {
   MaturityWindowStats,
 } from "../../domain/term-deposit/index.js";
 import type { TermDepositRepository } from "./repository.js";
-import { ok, type ServiceResult, type TermDepositRecord } from "./types.js";
+import { fail, ok, type ServiceResult, type TermDepositRecord } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const NUMBER_MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
 const ACTIVE_STATES: readonly TermDepositState[] = ["ACTIVE"];
 
@@ -59,27 +67,46 @@ function formatIsoDateUtc(d: Date): string {
 
 interface MutableCurrencyAcc {
   depositCount: number;
-  totalPrincipalMinor: number;
-  totalGrossInterestMinor: number;
-  totalTaxMinor: number;
-  totalNetInterestMinor: number;
-  totalMaturityAmountMinor: number;
+  totalPrincipalMinor: bigint;
+  totalGrossInterestMinor: bigint;
+  totalTaxMinor: bigint;
+  totalNetInterestMinor: bigint;
+  totalMaturityAmountMinor: bigint;
 }
 
+/**
+ * Bigint-safe monetary total. If the per-currency sum exceeds
+ * Number.MAX_SAFE_INTEGER, the conversion to `number` would silently
+ * corrupt the value. Callers must check the returned boolean before
+ * using the numeric representation.
+ */
+function bigintToSafeNumber(n: bigint): n is bigint {
+  return n >= -NUMBER_MAX_SAFE_INTEGER && n <= NUMBER_MAX_SAFE_INTEGER;
+}
+
+type WindowAggregate = {
+  byCurrency: readonly MaturityWindowCurrencyStats[];
+  totalDepositCount: number;
+};
+
+/**
+ * Aggregate deposits into per-currency totals for a single horizon
+ * [fromDate, toDate). Uses bigint accumulation internally and returns a
+ * typed OVERFLOW failure if any per-currency total exceeds
+ * Number.MAX_SAFE_INTEGER — the safe boundary established by the M1A
+ * calculator for minor-unit arithmetic.
+ */
 function aggregateWindow(
   deposits: readonly TermDepositRecord[],
   fromDate: string,
   toDate: string
-): {
-  byCurrency: readonly MaturityWindowCurrencyStats[];
-  totalDepositCount: number;
-} {
+): ServiceResult<WindowAggregate> {
   const acc = new Map<string, MutableCurrencyAcc>();
   for (const d of deposits) {
     if (!ACTIVE_STATES.includes(d.state)) continue;
-    // [fromDate, toDate) — exclusive upper bound so the three windows do
-    // not overlap. A deposit maturing exactly on `toDate` belongs to the
-    // next window.
+    // [fromDate, toDate) — exclusive upper bound so the horizons never
+    // include the boundary day in the shorter horizon (e.g. day+30
+    // belongs to days60, not days30).
     if (d.maturityDate < fromDate || d.maturityDate >= toDate) continue;
     let estimate: InterestEstimate;
     try {
@@ -102,45 +129,59 @@ function aggregateWindow(
     }
     const row = acc.get(d.currencyCode) ?? {
       depositCount: 0,
-      totalPrincipalMinor: 0,
-      totalGrossInterestMinor: 0,
-      totalTaxMinor: 0,
-      totalNetInterestMinor: 0,
-      totalMaturityAmountMinor: 0,
+      totalPrincipalMinor: 0n,
+      totalGrossInterestMinor: 0n,
+      totalTaxMinor: 0n,
+      totalNetInterestMinor: 0n,
+      totalMaturityAmountMinor: 0n,
     };
     row.depositCount += 1;
-    row.totalPrincipalMinor += d.principalMinor;
-    row.totalGrossInterestMinor += estimate.grossInterestMinor;
-    row.totalTaxMinor += estimate.taxMinor;
-    row.totalNetInterestMinor += estimate.netInterestMinor;
-    row.totalMaturityAmountMinor += estimate.maturityAmountMinor;
+    row.totalPrincipalMinor += BigInt(d.principalMinor);
+    row.totalGrossInterestMinor += BigInt(estimate.grossInterestMinor);
+    row.totalTaxMinor += BigInt(estimate.taxMinor);
+    row.totalNetInterestMinor += BigInt(estimate.netInterestMinor);
+    row.totalMaturityAmountMinor += BigInt(estimate.maturityAmountMinor);
     acc.set(d.currencyCode, row);
   }
-  const byCurrency: MaturityWindowCurrencyStats[] = Array.from(acc.entries())
-    .map(([currencyCode, v]) => ({
+  const byCurrency: MaturityWindowCurrencyStats[] = [];
+  for (const [currencyCode, v] of acc.entries()) {
+    if (
+      !bigintToSafeNumber(v.totalPrincipalMinor) ||
+      !bigintToSafeNumber(v.totalGrossInterestMinor) ||
+      !bigintToSafeNumber(v.totalTaxMinor) ||
+      !bigintToSafeNumber(v.totalNetInterestMinor) ||
+      !bigintToSafeNumber(v.totalMaturityAmountMinor)
+    ) {
+      return fail(
+        "OVERFLOW",
+        `Currency total for ${currencyCode} exceeds Number.MAX_SAFE_INTEGER; aggregation is not safe to represent in JavaScript number`
+      );
+    }
+    byCurrency.push({
       currencyCode,
       depositCount: v.depositCount,
-      totalPrincipalMinor: v.totalPrincipalMinor,
-      totalGrossInterestMinor: v.totalGrossInterestMinor,
-      totalTaxMinor: v.totalTaxMinor,
-      totalNetInterestMinor: v.totalNetInterestMinor,
-      totalMaturityAmountMinor: v.totalMaturityAmountMinor,
-    }))
-    // Stable sort: currency code ASC.
-    .sort((a, b) => (a.currencyCode < b.currencyCode ? -1 : a.currencyCode > b.currencyCode ? 1 : 0));
+      totalPrincipalMinor: Number(v.totalPrincipalMinor),
+      totalGrossInterestMinor: Number(v.totalGrossInterestMinor),
+      totalTaxMinor: Number(v.totalTaxMinor),
+      totalNetInterestMinor: Number(v.totalNetInterestMinor),
+      totalMaturityAmountMinor: Number(v.totalMaturityAmountMinor),
+    });
+  }
+  // Stable sort: currency code ASC.
+  byCurrency.sort((a, b) => (a.currencyCode < b.currencyCode ? -1 : a.currencyCode > b.currencyCode ? 1 : 0));
   const totalDepositCount = byCurrency.reduce((sum, x) => sum + x.depositCount, 0);
-  return { byCurrency, totalDepositCount };
+  return ok({ byCurrency, totalDepositCount });
 }
 
 export class MaturityStatisticsService {
   constructor(private readonly depositRepo: TermDepositRepository) {}
 
   /**
-   * Compute statistics for a single window [today, today + windowDays).
+   * Compute statistics for a single horizon [today, today + windowDays).
    *
    * `today` must be a strict ISO 'YYYY-MM-DD' calendar date in UTC.
    * The computation excludes the upper bound, so a deposit maturing
-   * exactly 30 days from `today` appears in `days60`, not `days30`.
+   * exactly windowDays from `today` does NOT appear in the result.
    *
    * The output groups deposits by currency. Different currencies are
    * never summed 1:1 (SPEC §3 / §8).
@@ -152,19 +193,29 @@ export class MaturityStatisticsService {
     const toDate = formatIsoDateUtc(new Date(parseIsoDateUtc(today).getTime() + windowDays * MS_PER_DAY));
     const deposits = await this.depositRepo.listAllActiveDeposits();
     const agg = aggregateWindow(deposits, fromDate, toDate);
+    if (agg.ok === false) return agg;
     return ok({
       windowDays,
       fromDate,
       toDate,
-      byCurrency: agg.byCurrency,
-      totalDepositCount: agg.totalDepositCount,
+      byCurrency: agg.value.byCurrency,
+      totalDepositCount: agg.value.totalDepositCount,
     });
   }
 
   /**
-   * Compute all three SPEC §8 windows in one call. The result is
-   * deterministic: the three windows share the same `today` and the
-   * deposit list is fetched once.
+   * Compute all three SPEC §8 horizons in one call. The horizons are
+   * CUMULATIVE from `today`:
+   *   days30 = [today, today+30d)
+   *   days60 = [today, today+60d)  (includes everything in days30)
+   *   days90 = [today, today+90d)  (includes everything in days60)
+   *
+   * This matches the SPEC §8 "30/60/90 maturity calendar/timeline" so
+   * the dashboard can render cumulative upcoming maturity exposure.
+   * A deposit maturing at 45 days appears in both days60 and days90.
+   *
+   * The result is deterministic: the three horizons share the same
+   * `today` and the deposit list is fetched once.
    */
   async computeAllWindows(today: string): Promise<ServiceResult<MaturityAllWindowsStats>> {
     const todayCheck = validateToday(today);
@@ -174,30 +225,36 @@ export class MaturityStatisticsService {
     const days60ToDate = formatIsoDateUtc(new Date(parseIsoDateUtc(today).getTime() + 60 * MS_PER_DAY));
     const days90ToDate = formatIsoDateUtc(new Date(parseIsoDateUtc(today).getTime() + 90 * MS_PER_DAY));
     const deposits = await this.depositRepo.listAllActiveDeposits();
+    // days30: [today, today+30d)
     const days30Agg = aggregateWindow(deposits, fromDate, days30ToDate);
-    const days60Agg = aggregateWindow(deposits, days30ToDate, days60ToDate);
-    const days90Agg = aggregateWindow(deposits, days60ToDate, days90ToDate);
+    if (days30Agg.ok === false) return days30Agg;
+    // days60: [today, today+60d) — cumulative, includes days30 contents.
+    const days60Agg = aggregateWindow(deposits, fromDate, days60ToDate);
+    if (days60Agg.ok === false) return days60Agg;
+    // days90: [today, today+90d) — cumulative, includes days60 contents.
+    const days90Agg = aggregateWindow(deposits, fromDate, days90ToDate);
+    if (days90Agg.ok === false) return days90Agg;
     return ok({
       days30: {
         windowDays: 30,
         fromDate,
         toDate: days30ToDate,
-        byCurrency: days30Agg.byCurrency,
-        totalDepositCount: days30Agg.totalDepositCount,
+        byCurrency: days30Agg.value.byCurrency,
+        totalDepositCount: days30Agg.value.totalDepositCount,
       },
       days60: {
         windowDays: 60,
-        fromDate: days30ToDate,
+        fromDate,
         toDate: days60ToDate,
-        byCurrency: days60Agg.byCurrency,
-        totalDepositCount: days60Agg.totalDepositCount,
+        byCurrency: days60Agg.value.byCurrency,
+        totalDepositCount: days60Agg.value.totalDepositCount,
       },
       days90: {
         windowDays: 90,
-        fromDate: days60ToDate,
+        fromDate,
         toDate: days90ToDate,
-        byCurrency: days90Agg.byCurrency,
-        totalDepositCount: days90Agg.totalDepositCount,
+        byCurrency: days90Agg.value.byCurrency,
+        totalDepositCount: days90Agg.value.totalDepositCount,
       },
     });
   }

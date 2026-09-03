@@ -2,10 +2,12 @@
  * Maturity statistics tests.
  *
  * Covers:
- *   - 30/60/90 day window computation is deterministic
+ *   - 30/60/90 day cumulative horizon computation is deterministic
  *   - currency-safe aggregation (different currencies are never summed)
- *   - window boundaries (exclusive upper bound, deposits maturing exactly
- *     on the boundary fall into the next window)
+ *   - horizon boundaries (exclusive upper bound; a deposit maturing exactly
+ *     on the boundary day falls outside the shorter horizon)
+ *   - bigint-safe aggregation that returns OVERFLOW before silent
+ *     corruption when a per-currency total exceeds Number.MAX_SAFE_INTEGER
  *   - zero deposits → empty byCurrency, count=0
  *   - deterministic ordering of byCurrency entries
  */
@@ -87,26 +89,14 @@ describe("computeAllWindows — determinism and correctness", () => {
     expect(r.value.days90.byCurrency).toEqual([]);
   });
 
-  it("deposit maturing in 15 days lands in days30 only", async () => {
-    await createActiveDeposit({ maturityDate: "2026-06-16" }); // 15 days after today=2026-06-01
-    const r = await statsService.computeAllWindows("2026-06-01");
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.days30.totalDepositCount).toBe(1);
-    expect(r.value.days60.totalDepositCount).toBe(0);
-    expect(r.value.days90.totalDepositCount).toBe(0);
-    expect(r.value.days30.byCurrency).toHaveLength(1);
-    expect(r.value.days30.byCurrency[0]?.currencyCode).toBe("PHP");
-  });
-
-  it("deposit maturing in 45 days lands in days60 only", async () => {
+  it("deposit maturing in 45 days lands in days60 and days90 (cumulative horizons)", async () => {
     await createActiveDeposit({ maturityDate: "2026-07-16" }); // 45 days after today
     const r = await statsService.computeAllWindows("2026-06-01");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.days30.totalDepositCount).toBe(0);
     expect(r.value.days60.totalDepositCount).toBe(1);
-    expect(r.value.days90.totalDepositCount).toBe(0);
+    expect(r.value.days90.totalDepositCount).toBe(1);
   });
 
   it("deposit maturing in 75 days lands in days90 only", async () => {
@@ -119,25 +109,27 @@ describe("computeAllWindows — determinism and correctness", () => {
     expect(r.value.days90.totalDepositCount).toBe(1);
   });
 
-  it("deposit maturing exactly on day-30 boundary lands in days60 (exclusive upper bound)", async () => {
+  it("deposit maturing exactly on day-30 boundary lands in days60 and days90 (exclusive upper bound)", async () => {
     await createActiveDeposit({ maturityDate: "2026-07-01" }); // exactly 30 days after today=2026-06-01
     const r = await statsService.computeAllWindows("2026-06-01");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.days30.totalDepositCount).toBe(0);
     expect(r.value.days60.totalDepositCount).toBe(1);
+    expect(r.value.days90.totalDepositCount).toBe(1);
   });
 
-  it("deposit maturing exactly on day-60 boundary lands in days90", async () => {
+  it("deposit maturing exactly on day-60 boundary lands in days90 only", async () => {
     await createActiveDeposit({ maturityDate: "2026-07-31" }); // exactly 60 days after today=2026-06-01
     const r = await statsService.computeAllWindows("2026-06-01");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    expect(r.value.days30.totalDepositCount).toBe(0);
     expect(r.value.days60.totalDepositCount).toBe(0);
     expect(r.value.days90.totalDepositCount).toBe(1);
   });
 
-  it("deposit maturing exactly 90 days out is excluded", async () => {
+  it("deposit maturing exactly 90 days out is excluded from all horizons", async () => {
     await createActiveDeposit({ maturityDate: "2026-08-30" }); // exactly 90 days after today=2026-06-01
     const r = await statsService.computeAllWindows("2026-06-01");
     expect(r.ok).toBe(true);
@@ -145,6 +137,16 @@ describe("computeAllWindows — determinism and correctness", () => {
     expect(r.value.days30.totalDepositCount).toBe(0);
     expect(r.value.days60.totalDepositCount).toBe(0);
     expect(r.value.days90.totalDepositCount).toBe(0);
+  });
+
+  it("deposit at 15 days is counted in all three (cumulative)", async () => {
+    await createActiveDeposit({ maturityDate: "2026-06-16" }); // 15 days after today=2026-06-01
+    const r = await statsService.computeAllWindows("2026-06-01");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.days30.totalDepositCount).toBe(1);
+    expect(r.value.days60.totalDepositCount).toBe(1);
+    expect(r.value.days90.totalDepositCount).toBe(1);
   });
 
   it("deposit maturing in the past is excluded", async () => {
@@ -270,5 +272,78 @@ describe("statistics respect the deterministic estimate", () => {
     expect(r.value.days30.byCurrency[0]?.totalTaxMinor).toBe(24_658);
     expect(r.value.days30.byCurrency[0]?.totalNetInterestMinor).toBe(98_630);
     expect(r.value.days30.byCurrency[0]?.totalMaturityAmountMinor).toBe(10_098_630);
+  });
+});
+
+// ── bigint overflow protection ─────────────────────────────────────────────
+
+describe("aggregation overflow protection", () => {
+  /**
+   * Insert two ACTIVE deposits whose per-currency principal sum exceeds
+   * Number.MAX_SAFE_INTEGER. Bypasses the service-layer input validation
+   * by writing directly to the D1 binding — the migration CHECK only requires
+   * `principal_minor >= 0` and an upper-bound-free INTEGER column.
+   */
+  async function insertHugeDeposit(
+    seed: SeededParents,
+    principalMinor: number,
+    maturityDate: string
+  ): Promise<void> {
+    const result = await db
+      .prepare(
+        `INSERT INTO term_deposits
+           (account_id, bank_id, holder_member_id, currency_code,
+            product_name, certificate_last_four,
+            principal_minor, start_date, maturity_date,
+            annual_rate_scaled, tax_rate_scaled, fees_minor,
+            interest_method, day_count_basis, state,
+            maturity_instruction)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        seed.accountId,
+        seed.bankId,
+        seed.memberId,
+        "PHP",
+        "Huge TD",
+        "9999",
+        principalMinor,
+        "2026-01-01",
+        maturityDate,
+        50_000,
+        0,
+        0,
+        "SIMPLE",
+        "ACT_365",
+        "ACTIVE",
+        "PENDING"
+      )
+      .run();
+    expect(result.success).toBe(true);
+  }
+
+  it("returns OVERFLOW when two individually-safe deposits sum beyond Number.MAX_SAFE_INTEGER", async () => {
+    // Number.MAX_SAFE_INTEGER = 9_007_199_254_740_991; two halves sum to
+    // MAX_SAFE_INTEGER + 1 and would silently lose precision as a `number`.
+    const half = Math.floor(Number.MAX_SAFE_INTEGER / 2) + 1;
+    await insertHugeDeposit(seeded, half, "2026-06-16");
+    await insertHugeDeposit(seeded, half, "2026-06-16");
+
+    const r = await statsService.computeAllWindows("2026-06-01");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("OVERFLOW");
+  });
+
+  it("a single deposit at Number.MAX_SAFE_INTEGER is still representable", async () => {
+    const half = Math.floor(Number.MAX_SAFE_INTEGER / 2);
+    await insertHugeDeposit(seeded, half, "2026-06-16");
+
+    const r = await statsService.computeAllWindows("2026-06-01");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const phpEntry = r.value.days30.byCurrency.find((c) => c.currencyCode === "PHP");
+    expect(phpEntry).toBeDefined();
+    expect(phpEntry?.totalPrincipalMinor).toBe(half);
   });
 });

@@ -107,11 +107,11 @@ export function computeTargetDate(maturityDate: string, offsetKind: ReminderOffs
  * their target date has been reached.
  */
 export function isReminderDue(targetDate: string, today: string): boolean {
-  // Both inputs are strict ISO YYYY-MM-DD; lexicographic comparison is
-  // equivalent to chronological comparison for that format.
-  if (!ISO_DATE_PATTERN.test(today)) {
-    throw new Error(`Invalid today date (expected YYYY-MM-DD): ${today}`);
-  }
-  parseIsoDateUtc(targetDate); // throws on malformed input
+  // Both inputs must round-trip through strict UTC calendar validation so
+  // impossible strings like `2026-99-99` are rejected before comparison.
+  // Lexicographic comparison is equivalent to chronological comparison
+  // only after both inputs have been confirmed valid calendar dates.
+  parseIsoDateUtc(today);
+  parseIsoDateUtc(targetDate);
   return today >= targetDate;
 }

@@ -41,9 +41,13 @@ export interface MaturityWindowStats {
 
 /**
  * Allowed maturity-window sizes. SPEC §8 requires 30/60/90; we model them
- * as the three non-overlapping windows
- *   [today, today+30),   [today+30, today+60),  [today+60, today+90)
- * so a deposit maturing in 45 days appears only in the days60 window.
+ * as the three CUMULATIVE horizons from `today`:
+ *   days30 = [today, today+30)
+ *   days60 = [today, today+60)  (includes everything in days30)
+ *   days90 = [today, today+90)  (includes everything in days60)
+ *
+ * A deposit maturing in 45 days appears in both days60 and days90, which
+ * is the semantic the SPEC §8 "30/60/90 maturity calendar/timeline" requires.
  */
 export const MATURITY_WINDOWS: readonly number[] = [30, 60, 90];
 
