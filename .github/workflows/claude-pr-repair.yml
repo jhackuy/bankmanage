@@ -130,13 +130,38 @@ jobs:
           ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
+          set +e
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
             --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 48 \
             --no-session-persistence --output-format json \
             "Repair the existing PR in place. Read .agent-task/context.md and .agent-task/validation-before.log, then inspect only relevant current files plus CLAUDE.md, AGENTS.md, SPEC/ADR sections needed for the blocker. Review comments are leads, not truth: verify every finding against current HEAD and do not resurrect stale findings. Fix current deterministic failures and current semantic blockers with the smallest complete change. Preserve scope, financial/security invariants, and the existing PR branch. Do not create branches/PRs, do not deploy, do not change product scope, and do not run commands. If current code is already correct, make no speculative edits." \
-            > .agent-task/claude-repair.json
+            > .agent-task/claude-repair.json 2> .agent-task/claude-repair.stderr
+          CLAUDE_STATUS=$?
+          set -e
+          if [ "$CLAUDE_STATUS" -ne 0 ]; then
+            echo "::error::Claude repair exited with status $CLAUDE_STATUS"
+            test ! -s .agent-task/claude-repair.stderr || sed -n '1,160p' .agent-task/claude-repair.stderr
+            if [ -s .agent-task/claude-repair.json ]; then
+              node - <<'NODE'
+          const fs = require("fs");
+          const raw = fs.readFileSync(".agent-task/claude-repair.json", "utf8");
+          try {
+            const data = JSON.parse(raw);
+            const summary = {
+              subtype: data.subtype ?? null,
+              is_error: data.is_error ?? null,
+              result: typeof data.result === "string" ? data.result.slice(0, 1200) : data.result ?? null,
+            };
+            process.stderr.write(JSON.stringify(summary) + "\n");
+          } catch {
+            process.stderr.write(raw.slice(-2000) + "\n");
+          }
+          NODE
+            fi
+            exit "$CLAUDE_STATUS"
+          fi
 
       - name: Deterministic validation after repair
         id: validation_after
@@ -162,13 +187,22 @@ jobs:
           ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
         run: |
           set -euo pipefail
+          set +e
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
             --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 20 \
             --no-session-persistence --output-format json \
             "Repair only the failures in .agent-task/validation-after.log. Use .agent-task/context.md for PR scope. Fix root cause only, do not broaden scope, do not create branches/PRs, do not deploy, and do not run commands." \
-            > .agent-task/claude-repair-2.json
+            > .agent-task/claude-repair-2.json 2> .agent-task/claude-repair-2.stderr
+          CLAUDE_STATUS=$?
+          set -e
+          if [ "$CLAUDE_STATUS" -ne 0 ]; then
+            echo "::error::Claude failure-only repair exited with status $CLAUDE_STATUS"
+            test ! -s .agent-task/claude-repair-2.stderr || sed -n '1,160p' .agent-task/claude-repair-2.stderr
+            test ! -s .agent-task/claude-repair-2.json || tail -c 2000 .agent-task/claude-repair-2.json >&2
+            exit "$CLAUDE_STATUS"
+          fi
 
       - name: Final deterministic validation
         run: ./scripts/agent-validate.sh
