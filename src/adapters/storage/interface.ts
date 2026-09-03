@@ -50,12 +50,4 @@ export interface DocumentStorageAdapter {
    * Check whether a document exists.
    */
   exists(key: string): Promise<boolean>;
-
-  /**
-   * Generate a short-lived, authenticated download URL for internal use only.
-   * The URL MUST be authenticated/signed and MUST NOT be a public R2 bucket URL.
-   *
-   * Expiry is in seconds. Implementations may enforce a maximum expiry.
-   */
-  signedUrl(key: string, expirySeconds: number): Promise<string>;
 }

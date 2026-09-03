@@ -3,9 +3,12 @@
  *
  * Wraps the Cloudflare `R2Bucket` binding behind the `DocumentStorageAdapter`
  * port. R2 objects are private — this adapter NEVER returns or persists an
- * unrestricted public bucket URL. Signed URLs use R2's native presigned-URL
- * capability; the URL is short-lived and authenticated, not a public bucket
- * URL.
+ * unrestricted public bucket URL. M3A authorized-byte access flows through
+ * `get()`; the Worker route verifies the requesting member's identity
+ * BEFORE calling the adapter, and the resulting bytes are streamed
+ * directly to the client. There is no signed-URL / presigned-URL code
+ * path; constructing one would either invent a method the binding does
+ * not expose, or produce a public-bucket URL.
  *
  * See SPEC.md §11, ADR-001, and `interface.ts`.
  */
@@ -50,10 +53,7 @@ interface R2AdapterBucket {
   } | null>;
   head(key: string): Promise<{ key: string; size: number; uploaded: Date } | null>;
   delete(key: string): Promise<void>;
-  createPresignedUrl(key: string, options?: { expiry?: Date; method?: string }): Promise<string>;
 }
-
-const MAX_SIGNED_URL_EXPIRY_SECONDS = 86_400;
 
 export class CloudflareR2DocumentStorageAdapter implements DocumentStorageAdapter {
   constructor(private readonly bucket: R2AdapterBucket) {}
@@ -74,7 +74,11 @@ export class CloudflareR2DocumentStorageAdapter implements DocumentStorageAdapte
     }
     const result = await this.bucket.put(key, data, putOptions);
     if (result === null) {
-      throw new Error(`R2 put returned null for key ${key}`);
+      // Object keys are private. The failure is "R2 did not return a
+      // put result"; we do not include the key in the message because
+      // that would leak the private key into any caller that surfaces
+      // the error.
+      throw new Error("R2 put returned no result");
     }
     return {
       key: result.key,
@@ -107,26 +111,5 @@ export class CloudflareR2DocumentStorageAdapter implements DocumentStorageAdapte
   async exists(key: string): Promise<boolean> {
     const head = await this.bucket.head(key);
     return head !== null;
-  }
-
-  /**
-   * Produce a short-lived, authenticated Cloudflare R2 signed URL.
-   *
-   * Cloudflare's native presigned URL is NOT an unrestricted public bucket
-   * URL — it embeds the binding's auth tokens and a bounded expiry. Callers
-   * (typically a Worker route) MUST still verify the request before serving
-   * the object; this adapter only generates the URL itself.
-   */
-  async signedUrl(key: string, expirySeconds: number): Promise<string> {
-    if (
-      !Number.isFinite(expirySeconds) ||
-      expirySeconds <= 0 ||
-      expirySeconds > MAX_SIGNED_URL_EXPIRY_SECONDS
-    ) {
-      throw new Error(`Invalid expiry: ${expirySeconds}s (must be 1–${MAX_SIGNED_URL_EXPIRY_SECONDS})`);
-    }
-    return await this.bucket.createPresignedUrl(key, {
-      expiry: new Date(Date.now() + expirySeconds * 1000),
-    });
   }
 }

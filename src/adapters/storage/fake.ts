@@ -2,13 +2,13 @@
  * Fake in-memory document storage adapter for tests.
  *
  * - Never returns a real R2 URL or any unrestricted public URL.
- * - Signed URLs use a local fake scheme so tests can assert the contract.
+ * - Authorized bytes flow through `get()`, which the application service
+ *   invokes after a member-scoped read. The fake returns the same
+ *   in-memory bytes that were stored via `put()`.
  * - No real storage, no real credentials required.
  */
 
 import type { DocumentStorageAdapter, StoredDocument } from "./interface.js";
-
-const FAKE_SIGNED_URL_PREFIX = "fakesigned://documents/";
 
 interface StoredEntry {
   data: Uint8Array;
@@ -82,16 +82,21 @@ export class FakeDocumentStorageAdapter implements DocumentStorageAdapter {
   }
 
   /**
-   * Returns a fake signed URL that is clearly not a real R2 public URL.
-   * Tests must assert that this URL starts with "fakesigned://" and NOT
-   * with "https://" or any public bucket domain.
+   * Test helper: produce an opaque, non-public signed URL identifier.
+   *
+   * This fake intentionally returns a `fakesigned://` URL — NOT an `https://`
+   * R2 public-bucket URL. The real adapter never exposes object keys or
+   * presigned URLs; authorized bytes flow through `get()` only.
    */
-  async signedUrl(key: string, expirySeconds: number): Promise<string> {
-    if (expirySeconds <= 0 || expirySeconds > 86_400) {
-      throw new Error(`Invalid expiry: ${expirySeconds}s (must be 1–86400)`);
+  async signedUrl(key: string, expiresInSeconds: number): Promise<string> {
+    if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
+      throw new Error("signedUrl expiry must be a positive number of seconds");
     }
-    const expires = Date.now() + expirySeconds * 1000;
-    return `${FAKE_SIGNED_URL_PREFIX}${encodeURIComponent(key)}?expires=${expires}`;
+    if (expiresInSeconds > 86_400) {
+      throw new Error("signedUrl expiry must not exceed 86400 seconds (24 h)");
+    }
+    const expiresAt = Math.floor(Date.now() / 1000) + Math.floor(expiresInSeconds);
+    return `fakesigned://bankmanage/${encodeURIComponent(key)}?expires=${expiresAt}`;
   }
 
   /** Test helper: number of stored documents. */
