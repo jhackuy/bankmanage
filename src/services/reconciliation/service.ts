@@ -370,16 +370,16 @@ function validateInput(input: PostReconciliationInput): ServiceResult<string> {
  * stored record (created=false), even if the ledger has since changed.
  *
  * `confirmedAt` is compared in canonical UTC form. `currencyCode` is
- * the caller-declared currency as supplied (or the empty string when
- * omitted) — NOT the account's currency, so a retry that omits
- * `currencyCode` produces a different identity from a prior write that
- * declared it. The service validates that the declared currency (when
- * present) matches the account's currency upstream.
+ * part of the identity: omitting it on retry produces a distinct
+ * identity from a prior write that explicitly declared a currency,
+ * so the retry surfaces IDEMPOTENCY_CONFLICT rather than silently
+ * returning the prior row. A sentinel marks the omitted case so it
+ * cannot collide with any real ISO-4217 currency code.
  */
 function reconciliationRequestIdentity(input: PostReconciliationInput, canonicalConfirmedAt: string): string {
   return [
     input.accountId,
-    input.currencyCode ?? "",
+    input.currencyCode ?? "__currency_omitted__",
     input.bankConfirmedBalanceMinor,
     canonicalConfirmedAt,
     input.evidenceRef ?? "null",
