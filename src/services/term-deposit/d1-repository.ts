@@ -186,6 +186,23 @@ export class D1TermDepositRepository implements TermDepositRepository {
     return result.results.map(rowToRecord);
   }
 
+  async listAllActiveDeposits(): Promise<TermDepositRecord[]> {
+    const result = await this.db
+      .prepare("SELECT * FROM term_deposits WHERE state = 'ACTIVE' " + "ORDER BY maturity_date ASC, id ASC")
+      .all<TermDepositRow>();
+    return result.results.map(rowToRecord);
+  }
+
+  async listMaturedUnresolvedDeposits(): Promise<TermDepositRecord[]> {
+    const result = await this.db
+      .prepare(
+        "SELECT * FROM term_deposits WHERE state = 'MATURED_ACTION_REQUIRED' " +
+          "ORDER BY maturity_date ASC, id ASC"
+      )
+      .all<TermDepositRow>();
+    return result.results.map(rowToRecord);
+  }
+
   async updateEditableFacts(
     id: number,
     patch: EditableFactsPatch,

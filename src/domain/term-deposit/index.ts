@@ -41,3 +41,21 @@ export {
   type TransitionRequest,
   type TransitionResult,
 } from "./state-machine.js";
+
+export {
+  REMINDER_OFFSETS,
+  REMINDER_OFFSET_KINDS,
+  REMINDER_STATUSES,
+  computeTargetDate,
+  isReminderDue,
+  type ReminderOffsetKind,
+  type ReminderStatus,
+  type ReminderRecord,
+} from "./reminders.js";
+
+export {
+  MATURITY_WINDOWS,
+  type MaturityWindowCurrencyStats,
+  type MaturityWindowStats,
+  type MaturityAllWindowsStats,
+} from "./maturity-statistics.js";

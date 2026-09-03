@@ -428,4 +428,131 @@ describe("D1 migrations", () => {
       db.prepare("UPDATE term_deposits SET predecessor_deposit_id = ? WHERE id = ?").run(id, id);
     }).toThrow();
   });
+
+  // ── Migration 0005: term_deposit_reminders (M1C) ──────────────────────────
+
+  it("creates term_deposit_reminders table", () => {
+    applyMigrations(db);
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='term_deposit_reminders'")
+      .get();
+    expect(row).toBeDefined();
+  });
+
+  it("records migration metadata for version 5", () => {
+    applyMigrations(db);
+    const row = db.prepare("SELECT * FROM migration_metadata WHERE version = 5").get() as
+      | { name: string }
+      | undefined;
+    expect(row).toBeDefined();
+    expect(row?.name).toBe("0005_term_deposit_reminders");
+  });
+
+  it("term_deposit_reminders offset_kind CHECK constraint enforces D-30/D-7/D-1/D0", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const deposit = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const depositId = Number(deposit.lastInsertRowid);
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposit_reminders
+           (deposit_id, offset_kind, target_date)
+         VALUES (?, 'NOT_AN_OFFSET', '2026-03-02')`
+      ).run(depositId);
+    }).toThrow();
+  });
+
+  it("term_deposit_reminders status CHECK constraint enforces PENDING/MUTED/DELIVERED/CANCELLED", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const deposit = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const depositId = Number(deposit.lastInsertRowid);
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposit_reminders
+           (deposit_id, offset_kind, target_date, status)
+         VALUES (?, 'D0', '2026-04-01', 'INVALID_STATUS')`
+      ).run(depositId);
+    }).toThrow();
+  });
+
+  it("term_deposit_reminders UNIQUE (deposit_id, offset_kind) prevents duplicates", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const deposit = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const depositId = Number(deposit.lastInsertRowid);
+
+    db.prepare(
+      `INSERT INTO term_deposit_reminders (deposit_id, offset_kind, target_date) VALUES (?, 'D0', '2026-04-01')`
+    ).run(depositId);
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO term_deposit_reminders (deposit_id, offset_kind, target_date) VALUES (?, 'D0', '2026-04-01')`
+      ).run(depositId);
+    }).toThrow();
+  });
+
+  it("term_deposit_reminders cascades on deposit delete", () => {
+    applyMigrations(db);
+    const p = seedDepositParents();
+    const deposit = db
+      .prepare(
+        `INSERT INTO term_deposits
+         (account_id, bank_id, holder_member_id, currency_code,
+          product_name, certificate_last_four,
+          principal_minor, start_date, maturity_date,
+          annual_rate_scaled, tax_rate_scaled, fees_minor,
+          interest_method, day_count_basis)
+         VALUES (?, ?, ?, ?, ?, '1234', 1000000, '2026-01-01', '2026-04-01',
+                 50000, 200000, 0, 'SIMPLE', 'ACT_365')`
+      )
+      .run(p.accountId, p.bankId, p.memberId, p.currency, "Test Product");
+    const depositId = Number(deposit.lastInsertRowid);
+    db.prepare(
+      `INSERT INTO term_deposit_reminders (deposit_id, offset_kind, target_date) VALUES (?, 'D0', '2026-04-01')`
+    ).run(depositId);
+
+    db.prepare("DELETE FROM term_deposits WHERE id = ?").run(depositId);
+
+    const cnt = (
+      db
+        .prepare("SELECT COUNT(*) as cnt FROM term_deposit_reminders WHERE deposit_id = ?")
+        .get(depositId) as { cnt: number }
+    ).cnt;
+    expect(cnt).toBe(0);
+  });
 });

@@ -66,6 +66,20 @@ export interface TermDepositRepository {
   listByHolder(memberId: number): Promise<TermDepositRecord[]>;
 
   /**
+   * SELECT every deposit currently in ACTIVE state, ordered by maturity_date
+   * ASC then id ASC. Used by the reminder scanner to iterate all eligible
+   * deposits without joining against household_members.
+   */
+  listAllActiveDeposits(): Promise<TermDepositRecord[]>;
+
+  /**
+   * SELECT every deposit currently in MATURED_ACTION_REQUIRED state,
+   * ordered by maturity_date ASC then id ASC. Used by the action-required
+   * query per SPEC §5.
+   */
+  listMaturedUnresolvedDeposits(): Promise<TermDepositRecord[]>;
+
+  /**
    * Update editable draft/review facts. The repository enforces that the
    * row's current state is in `allowedStates` via optimistic locking; if
    * not, the operation throws.

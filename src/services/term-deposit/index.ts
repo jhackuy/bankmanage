@@ -1,8 +1,9 @@
 /**
  * Term-deposit application-service barrel.
  *
- * Re-exports the public surface of the M1B slice. The Worker/Hono layer
- * must import from this barrel rather than reaching into internal files.
+ * Re-exports the public surface of the M1B / M1C slices. The Worker/Hono
+ * layer must import from this barrel rather than reaching into internal
+ * files.
  */
 
 export {
@@ -29,3 +30,9 @@ export {
   fail,
   ok,
 } from "./types.js";
+
+export { type ReminderRepository } from "./reminder-repository.js";
+export { D1ReminderRepository } from "./d1-reminder-repository.js";
+export { TermDepositReminderService, type ScanResult } from "./reminder-service.js";
+
+export { MaturityStatisticsService } from "./maturity-statistics-service.js";
