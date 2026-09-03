@@ -148,10 +148,19 @@ jobs:
           const raw = fs.readFileSync(".agent-task/claude-repair.json", "utf8");
           try {
             const data = JSON.parse(raw);
+            const bound = (value) => {
+              if (value == null) return null;
+              try {
+                return (typeof value === "string" ? value : JSON.stringify(value)).slice(0, 1200);
+              } catch {
+                return String(value).slice(0, 1200);
+              }
+            };
             const summary = {
               subtype: data.subtype ?? null,
               is_error: data.is_error ?? null,
-              result: typeof data.result === "string" ? data.result.slice(0, 1200) : data.result ?? null,
+              result: bound(data.result),
+              errors: bound(data.errors ?? data.error),
             };
             process.stderr.write(JSON.stringify(summary) + "\n");
           } catch {
@@ -205,10 +214,19 @@ jobs:
           const raw = fs.readFileSync(".agent-task/claude-repair-2.json", "utf8");
           try {
             const data = JSON.parse(raw);
+            const bound = (value) => {
+              if (value == null) return null;
+              try {
+                return (typeof value === "string" ? value : JSON.stringify(value)).slice(0, 1200);
+              } catch {
+                return String(value).slice(0, 1200);
+              }
+            };
             const summary = {
               subtype: data.subtype ?? null,
               is_error: data.is_error ?? null,
-              result: typeof data.result === "string" ? data.result.slice(0, 1200) : data.result ?? null,
+              result: bound(data.result),
+              errors: bound(data.errors ?? data.error),
             };
             process.stderr.write(JSON.stringify(summary) + "\n");
           } catch {
