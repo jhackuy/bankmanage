@@ -155,7 +155,7 @@ jobs:
             };
             process.stderr.write(JSON.stringify(summary) + "\n");
           } catch {
-            process.stderr.write(raw.slice(-2000) + "\n");
+            process.stderr.write(JSON.stringify({ parse_error: true, tail: raw.slice(-1200) }) + "\n");
           }
           NODE
             fi
