@@ -137,16 +137,22 @@ jobs:
           claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
             --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
             --strict-mcp-config --disable-slash-commands --setting-sources project \
-            --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 18 \
+            --exclude-dynamic-system-prompt-sections --autocompact 100k --max-turns 32 \
             --no-session-persistence --output-format json \
             "Repair only failures in .agent-task/validation-1.log for .agent-task/issue.md. Do not broaden scope. Read the failing log and relevant changed files, fix the root cause/tests, then stop. Do not run commands or deploy." \
             > .agent-task/claude-repair-result.json
           CLAUDE_STATUS=$?
           set -e
           if (( CLAUDE_STATUS != 0 )); then
-            echo "Claude repair failed; sanitized result:" >&2
+            echo "Claude repair returned non-zero; sanitized result:" >&2
             jq '{is_error,subtype,result,errors}' .agent-task/claude-repair-result.json >&2 || true
-            exit "$CLAUDE_STATUS"
+            SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-repair-result.json 2>/dev/null || true)
+            REPO_CHANGES=$(git status --porcelain --untracked-files=all | grep -vE '^\\?\\? \\.agent-task/' || true)
+            if [[ "$SUBTYPE" == "error_max_turns" && -n "$REPO_CHANGES" ]]; then
+              echo "Claude repair reached its turn bound with repository changes; continuing to final deterministic validation." >> "$GITHUB_STEP_SUMMARY"
+            else
+              exit "$CLAUDE_STATUS"
+            fi
           fi
 
       - name: Final deterministic validation
