@@ -41,6 +41,7 @@ interface ReconciliationRow {
   confirmed_at: string;
   evidence_ref: string | null;
   idempotency_key: string;
+  currency_declared: number;
   created_at: string;
   updated_at: string;
 }
@@ -57,6 +58,7 @@ function rowToRecord(row: ReconciliationRow): ReconciliationRecord {
     confirmedAt: row.confirmed_at,
     evidenceRef: row.evidence_ref,
     idempotencyKey: row.idempotency_key,
+    currencyDeclared: row.currency_declared === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -77,8 +79,8 @@ export class D1ReconciliationRepository implements ReconciliationRepository {
         `INSERT OR IGNORE INTO account_reconciliations (
            account_id, member_id, currency_code,
            bank_confirmed_balance_minor, cleared_balance_minor, difference_minor,
-           confirmed_at, evidence_ref, idempotency_key
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           confirmed_at, evidence_ref, idempotency_key, currency_declared
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.accountId,
@@ -89,7 +91,8 @@ export class D1ReconciliationRepository implements ReconciliationRepository {
         input.differenceMinor,
         input.confirmedAt,
         input.evidenceRef,
-        input.idempotencyKey
+        input.idempotencyKey,
+        input.currencyDeclared ? 1 : 0
       )
       .run();
     // `created` is derived from the WRITE result, not a pre-read. The

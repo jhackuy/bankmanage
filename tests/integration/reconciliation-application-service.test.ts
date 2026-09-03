@@ -998,6 +998,7 @@ describe("atomicity / zero partial state", () => {
         confirmedAt: "2026-03-15T10:00:00.000Z",
         evidenceRef: null,
         idempotencyKey: "fk-violation-1",
+        currencyDeclared: false,
       });
     } catch {
       caught = true;

@@ -27,6 +27,7 @@ export interface EnsureReconciliationInput {
   readonly confirmedAt: string;
   readonly evidenceRef: string | null;
   readonly idempotencyKey: string;
+  readonly currencyDeclared: boolean;
 }
 
 /**

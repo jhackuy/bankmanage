@@ -144,6 +144,7 @@ export class ReconciliationApplicationService {
         confirmedAt: canonicalConfirmedAt,
         evidenceRef: input.evidenceRef ?? null,
         idempotencyKey: input.idempotencyKey,
+        currencyDeclared: input.currencyCode !== undefined,
       });
     } catch (err) {
       return fail("INTERNAL", err instanceof Error ? err.message : "Unable to record reconciliation");
@@ -396,12 +397,20 @@ function reconciliationRequestIdentity(input: PostReconciliationInput, canonical
  * `clearedBalanceMinor` / `differenceMinor` are NOT included — they
  * belong to the snapshot at write time, not to the request identity.
  * `confirmedAt` is already canonical (the service writes the canonical
- * form) and `currencyCode` is the stored snapshot value.
+ * form). The stored `currencyCode` is always the account's currency
+ * (the service normalizes omitted input to the account currency before
+ * insert because the column is NOT NULL with an FK to currencies(code)).
+ * The `currencyDeclared` flag preserves whether the ORIGINAL caller
+ * provided a currency, so the identity comparison stays symmetric with
+ * `reconciliationRequestIdentity`: when the caller omitted, the stored
+ * side uses the sentinel too; when the caller provided, the stored side
+ * uses the real currency. A retry that flips declared/omitted therefore
+ * surfaces IDEMPOTENCY_CONFLICT.
  */
 function storedReconciliationIdentity(record: ReconciliationRecord): string {
   return [
     record.accountId,
-    record.currencyCode,
+    record.currencyDeclared ? record.currencyCode : "__currency_omitted__",
     record.bankConfirmedBalanceMinor,
     record.confirmedAt,
     record.evidenceRef ?? "null",

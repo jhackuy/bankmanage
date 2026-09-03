@@ -37,6 +37,7 @@ export interface ReconciliationRecord {
   readonly confirmedAt: string;
   readonly evidenceRef: string | null;
   readonly idempotencyKey: string;
+  readonly currencyDeclared: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

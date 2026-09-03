@@ -50,6 +50,7 @@ try {
     "categories",
     "term_deposits",
     "term_deposit_reminders",
+    "account_reconciliations",
   ];
 
   for (const table of expectedTables) {
