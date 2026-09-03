@@ -11,9 +11,16 @@
  *   - idempotent transaction + balanced entry insertion;
  *   - reversal linkage storage with race-safe UNIQUE constraints.
  *
+ * Normal ledger operations NEVER physically delete. The repository
+ * exposes exactly one recovery-only deletion entrypoint
+ * (`deleteTransactionAndEntries`) which the application service calls
+ * only when an in-progress write leaves an orphan header + entries
+ * with no linkage row. The method is guarded so it cannot delete
+ * linked transactions, and is not part of the read or write business
+ * flow.
+ *
  * The repository does NOT:
  *   - validate business invariants (those live in the application service);
- *   - physically delete transactions (SPEC §7 immutability);
  *   - compute balances or statistics (M2A leaves that to a future slice).
  */
 
@@ -104,4 +111,17 @@ export interface TransactionsRepository {
 
   /** Read the reversal row that points to a specific reversal transaction. */
   findReversalByReversalId(reversalTransactionId: number): Promise<TransactionReversalRecord | null>;
+
+  /**
+   * Recovery-only operation. Hard-deletes a transaction row and its
+   * ledger entries when they are in an inconsistent state — the call
+   * guards on (id, idempotency_key) matching a single row and refuses
+   * if any `transaction_reversals` row references the id, so the
+   * repository cannot accidentally delete linked history.
+   *
+   * The application service invokes this only from the rollback path
+   * of `reverseTransaction`, after a successful header+entries insert
+   * but a failed linkage insert. Normal posting flows never delete.
+   */
+  deleteTransactionAndEntries(transactionId: number, idempotencyKey: string): Promise<void>;
 }

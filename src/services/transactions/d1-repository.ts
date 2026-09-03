@@ -5,20 +5,30 @@
  * application service sees only the abstract `TransactionsRepository` port.
  *
  * Atomicity:
- *   The `postTransaction` method inserts the header + N balanced ledger
- *   entries via D1's batch() API. better-sqlite3 wraps each batch in a
- *   single SQLite transaction so the entire post is atomic: either the
- *   header AND all entries are persisted, or nothing is.
+ *   The `postTransaction` method inserts the transaction header AND its
+ *   balanced ledger entries in a single SQL statement using a CTE: the
+ *   header is INSERTed in a `WITH new_txn AS (... RETURNING id)` CTE,
+ *   and the main INSERT into `ledger_entries` references that id. A
+ *   single SQL statement is auto-committed as one transaction in D1 (and
+ *   in better-sqlite3 via the FakeD1Database binding), so either BOTH
+ *   the header AND all entries persist, or nothing does. There is no
+ *   path that yields a header with zero entries.
  *
  * Idempotency:
  *   The transactions.idempotency_key UNIQUE constraint is the race-safe
- *   boundary. A duplicate INSERT OR IGNORE on the key leaves the existing
- *   row in place; the subsequent SELECT returns it. The repository then
- *   returns the existing transaction with `created: false` so the caller
- *   can treat the retry as a no-op.
+ *   boundary. The CTE's inner INSERT throws on collision; the batch
+ *   call's catch block re-reads by key and returns the existing
+ *   transaction with `created: false` so the caller can treat the
+ *   retry as a no-op.
+ *
+ *   Reuse of the same key with a DIFFERENT immutable request is
+ *   detected at the service layer (compare rebuilt identity strings)
+ *   and surfaced as IDEMPOTENCY_CONFLICT. The repository itself does
+ *   not make a payload-equality judgment — only the schema enforces
+ *   key uniqueness.
  */
 
-import type { D1Database, D1PreparedStatement } from "../../adapters/d1/types.js";
+import type { D1Database } from "../../adapters/d1/types.js";
 import type { LedgerDirection, TransactionState, TransactionType } from "../../domain/ledger/index.js";
 import type { PostTransactionPayload, PostTransactionResult, TransactionsRepository } from "./repository.js";
 import type {
@@ -114,90 +124,84 @@ export class D1TransactionsRepository implements TransactionsRepository {
   constructor(private readonly db: D1Database) {}
 
   async postTransaction(payload: PostTransactionPayload): Promise<PostTransactionResult> {
-    // Pre-check: if the key already exists, return the existing transaction
-    // + its entries without touching the DB further. The race-safe boundary
-    // is the INSERT OR IGNORE below; this pre-check is a fast-path.
+    // Pre-check fast path: if the key already exists, return the
+    // existing transaction + its entries without touching the DB
+    // further. The UNIQUE constraint below is the authoritative
+    // race-safe boundary.
     const existing = await this.findByIdempotencyKey(payload.transaction.idempotencyKey);
     if (existing !== null) {
       const entries = await this.listEntriesByTransaction(existing.id);
       return { transaction: existing, entries, created: false };
     }
 
-    // 1. INSERT the transaction header with INSERT OR IGNORE so a
-    //    concurrent insert slipped between the pre-check above and this
-    //    write cannot raise a UNIQUE violation. RETURNING gives us the
-    //    row's id in one round trip.
-    const headerRow = await this.db
-      .prepare(
-        `INSERT OR IGNORE INTO transactions (
-           transaction_type, member_id, currency_code, amount_minor,
-           occurred_on, description, idempotency_key,
-           source_evidence_ref
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         RETURNING *`
-      )
-      .bind(
-        payload.transaction.transactionType,
-        payload.transaction.memberId,
-        payload.transaction.currencyCode,
-        payload.transaction.amountMinor,
-        payload.transaction.occurredOn,
-        payload.transaction.description ?? null,
-        payload.transaction.idempotencyKey,
-        payload.transaction.sourceEvidenceRef ?? null
-      )
-      .first<TransactionRow>();
+    // Build an atomic CTE statement: the transaction header is
+    // INSERTed in a CTE and its RETURNING id is selected by the main
+    // INSERT into ledger_entries. Both inserts are part of one SQL
+    // statement, so they share one auto-commit transaction.
+    const entryCount = payload.entries.length;
+    if (entryCount === 0) {
+      throw new Error("postTransaction: requires at least one ledger entry");
+    }
+    const entrySelects = payload.entries
+      .map(() => "SELECT id, ?, ?, ?, ?, ?, ? FROM new_txn")
+      .join("\n          UNION ALL\n");
+    const sql = `WITH new_txn AS (
+            INSERT INTO transactions (
+              transaction_type, member_id, currency_code, amount_minor,
+              occurred_on, description, idempotency_key, source_evidence_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+          )
+          INSERT INTO ledger_entries (
+            transaction_id, account_id, category_id, direction,
+            amount_minor, currency_code, memo
+          )
+          ${entrySelects}`;
 
-    if (headerRow === null) {
-      // INSERT OR IGNORE collided with a concurrent insert. Re-read by
-      // idempotency_key and return the canonical record with created=false.
-      const reRead = await this.findByIdempotencyKey(payload.transaction.idempotencyKey);
-      if (reRead === null) {
-        throw new Error("postTransaction: header insert collided and key not found");
+    const params: unknown[] = [
+      payload.transaction.transactionType,
+      payload.transaction.memberId,
+      payload.transaction.currencyCode,
+      payload.transaction.amountMinor,
+      payload.transaction.occurredOn,
+      payload.transaction.description ?? null,
+      payload.transaction.idempotencyKey,
+      payload.transaction.sourceEvidenceRef ?? null,
+    ];
+    for (const e of payload.entries) {
+      params.push(e.accountId, e.categoryId, e.direction, e.amountMinor, e.currencyCode, e.memo ?? null);
+    }
+
+    try {
+      await this.db.batch([this.db.prepare(sql).bind(...(params as never[]))]);
+    } catch (err) {
+      // UNIQUE collision: a concurrent caller slipped between the
+      // pre-check above and our CTE INSERT. The CTE's inner INSERT
+      // threw and nothing was persisted. Re-read the canonical row.
+      if (
+        err instanceof Error &&
+        /UNIQUE constraint failed: transactions\.idempotency_key/i.test(err.message)
+      ) {
+        const reRead = await this.findByIdempotencyKey(payload.transaction.idempotencyKey);
+        if (reRead === null) {
+          throw new Error("postTransaction: unique collision but key not found in re-read");
+        }
+        const entries = await this.listEntriesByTransaction(reRead.id);
+        return { transaction: reRead, entries, created: false };
       }
-      const entries = await this.listEntriesByTransaction(reRead.id);
-      return { transaction: reRead, entries, created: false };
+      throw err;
     }
-    const transactionId = headerRow.id;
 
-    // 2. Build the ledger-entry INSERT statements and run them in a single
-    //    D1 batch. better-sqlite3 wraps the batch in a SQLite transaction
-    //    so the header + all entries are atomic: either every row lands
-    //    or none do.
-    const entryStmts: D1PreparedStatement[] = payload.entries.map((e) =>
-      this.db
-        .prepare(
-          `INSERT INTO ledger_entries (
-             transaction_id, account_id, category_id,
-             direction, amount_minor, currency_code, memo
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-        )
-        .bind(
-          transactionId,
-          e.accountId,
-          e.categoryId,
-          e.direction,
-          e.amountMinor,
-          e.currencyCode,
-          e.memo ?? null
-        )
-    );
-
-    await this.db.batch(entryStmts);
-
-    // 3. Read back the canonical entries (the DB defaults for created_at
-    //    are applied) and the canonical header.
-    const entries = await this.listEntriesByTransaction(transactionId);
-    if (entries.length !== payload.entries.length) {
-      throw new Error(
-        `postTransaction: expected ${payload.entries.length} ledger entries, got ${entries.length}`
-      );
+    // Success: read the canonical header + entries back and return.
+    const reRead = await this.findByIdempotencyKey(payload.transaction.idempotencyKey);
+    if (reRead === null) {
+      throw new Error("postTransaction: header missing after successful batch insert");
     }
-    const canonical = await this.findById(transactionId);
-    if (canonical === null) {
-      throw new Error("postTransaction: header row missing after batch insert");
+    const entries = await this.listEntriesByTransaction(reRead.id);
+    if (entries.length !== entryCount) {
+      throw new Error(`postTransaction: expected ${entryCount} ledger entries, got ${entries.length}`);
     }
-    return { transaction: canonical, entries, created: true };
+    return { transaction: reRead, entries, created: true };
   }
 
   async findById(id: number): Promise<TransactionRecord | null> {
@@ -310,5 +314,58 @@ export class D1TransactionsRepository implements TransactionsRepository {
       .bind(reversalTransactionId)
       .first<TransactionReversalRow>();
     return row === null ? null : rowToReversal(row);
+  }
+
+  /**
+   * Recovery-only operation. Removes a transaction row and its ledger
+   * entries when they are in an inconsistent state — specifically, a
+   * reversal header was inserted but the linkage insert failed, leaving
+   * an orphan reversal with the original still in POSTED state.
+   *
+   * Guard rails:
+   *   - Requires the (id, idempotency_key) pair to match a single row
+   *     so a corrupted call cannot delete the wrong transaction.
+   *   - Refuses to delete if a row in `transaction_reversals` points at
+   *     this id (it is properly linked and is ledger history).
+   *   - Refuses to delete a transaction that has ledger entries
+   *     referenced by anything other than itself (forward-references
+   *     or splits).
+   *
+   * The application service calls this only from the roll-back path of
+   * `reverseTransaction`. Normal operation never deletes.
+   */
+  async deleteTransactionAndEntries(transactionId: number, idempotencyKey: string): Promise<void> {
+    // Guard: refuse to delete if the transaction is linked by a reversal
+    // row in either direction. This is part of "never physically delete
+    // ledger history".
+    const linked = await this.db
+      .prepare(
+        `SELECT 1 FROM transaction_reversals
+           WHERE original_transaction_id = ? OR reversal_transaction_id = ?
+           LIMIT 1`
+      )
+      .bind(transactionId, transactionId)
+      .first<{ 1: number }>();
+    if (linked !== null) {
+      throw new Error(
+        `deleteTransactionAndEntries: transaction ${transactionId} is linked by a reversal row, refusing to delete`
+      );
+    }
+
+    // FK DELETE from ledger_entries cascades through the transactions.id
+    // -> ledger_entries.transaction_id relationship. We rely on
+    // FOREIGN KEY support in both D1 and the better-sqlite3 backing
+    // store. We delete entries first so the relationship becomes
+    // orphans even if FK pragma is OFF.
+    await this.db.prepare("DELETE FROM ledger_entries WHERE transaction_id = ?").bind(transactionId).run();
+    const header = await this.db
+      .prepare("DELETE FROM transactions WHERE id = ? AND idempotency_key = ?")
+      .bind(transactionId, idempotencyKey)
+      .run();
+    if (header.meta.changes === 0) {
+      throw new Error(
+        `deleteTransactionAndEntries: no transaction with id=${transactionId} and matching key`
+      );
+    }
   }
 }

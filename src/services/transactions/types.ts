@@ -44,12 +44,18 @@ export interface LedgerEntryRecord {
 }
 
 /**
- * Transaction + ledger entries view returned by read-side queries.
- * Entries are ordered by id ASC for stable comparison in tests.
+ * Transaction + ledger entries view returned by read-side queries and
+ * post-side results. Entries are ordered by id ASC for stable comparison
+ * in tests.
+ *
+ * `created` is only set by write operations (post / reverse) — reads
+ * leave it undefined. It signals whether the call produced a new row
+ * (true) or returned an existing one via the idempotency key (false).
  */
 export interface TransactionWithEntries {
   readonly transaction: TransactionRecord;
   readonly entries: readonly LedgerEntryRecord[];
+  readonly created?: boolean;
 }
 
 /** Reversal linkage row (SPEC §7 — void/reversal semantics). */
@@ -118,12 +124,15 @@ export type ServiceErrorCode =
   | "INVALID_INPUT"
   | "ACCOUNT_NOT_FOUND"
   | "ACCOUNT_INACTIVE"
+  | "ACCOUNT_FORBIDDEN"
   | "CATEGORY_NOT_FOUND"
   | "CATEGORY_INACTIVE"
   | "MEMBER_NOT_FOUND"
+  | "MEMBER_INACTIVE"
   | "CURRENCY_MISMATCH"
   | "CROSS_CURRENCY_REJECTED"
   | "DUPLICATE_IDEMPOTENCY_KEY"
+  | "IDEMPOTENCY_CONFLICT"
   | "TRANSACTION_NOT_FOUND"
   | "TRANSACTION_ALREADY_REVERSED"
   | "ILLEGAL_TRANSITION"

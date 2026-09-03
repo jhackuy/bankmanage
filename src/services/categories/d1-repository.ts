@@ -243,20 +243,18 @@ export class D1CategoryRepository implements CategoryRepository {
     patch: { sortOrder?: number; useCount?: number; lastUsedAt?: string | null }
   ): Promise<CategoryFavoriteRecord> {
     // SQLite UPSERT (ON CONFLICT) keeps the race-safe single-row-per-pair
-    // invariant without a pre-read.
+    // invariant without a pre-read. The UPDATE SET clause uses
+    // `excluded.*` to reference the INSERTed values directly — no extra
+    // placeholders or bound params are needed for those columns.
     const sets: string[] = [];
-    const params: unknown[] = [];
     if (patch.sortOrder !== undefined) {
       sets.push("sort_order = excluded.sort_order");
-      params.push(patch.sortOrder);
     }
     if (patch.useCount !== undefined) {
       sets.push("use_count = excluded.use_count");
-      params.push(patch.useCount);
     }
     if (patch.lastUsedAt !== undefined) {
       sets.push("last_used_at = excluded.last_used_at");
-      params.push(patch.lastUsedAt);
     }
     sets.push("updated_at = datetime('now', 'utc')");
 
@@ -272,17 +270,9 @@ export class D1CategoryRepository implements CategoryRepository {
     const insertSortOrder = patch.sortOrder ?? 0;
     const insertUseCount = patch.useCount ?? 0;
     const insertLastUsedAt = patch.lastUsedAt ?? null;
-    const finalParams: unknown[] = [
-      memberId,
-      categoryId,
-      insertSortOrder,
-      insertUseCount,
-      insertLastUsedAt,
-      ...params,
-    ];
     const row = await this.db
       .prepare(sql)
-      .bind(...(finalParams as never[]))
+      .bind(memberId, categoryId, insertSortOrder, insertUseCount, insertLastUsedAt)
       .first<CategoryFavoriteRow>();
     if (row === null) {
       throw new Error("upsertFavorite: RETURNING produced no row");
