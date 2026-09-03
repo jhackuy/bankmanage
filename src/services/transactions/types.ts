@@ -73,8 +73,9 @@ export interface TransactionReversalRecord {
 /**
  * Posting input for INCOME / EXPENSE. For TRANSFER see `PostTransferInput`.
  *
- * `categoryId` is optional for INCOME (income-source categories) and
- * required for EXPENSE (expense categories per SPEC §6.1).
+ * `categoryId` is required for BOTH INCOME and EXPENSE (income-source
+ * and expense categories per SPEC §6.1). For TRANSFER see
+ * `PostTransferInput`.
  */
 export interface PostIncomeExpenseInput {
   readonly memberId: number;

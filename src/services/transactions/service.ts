@@ -103,10 +103,11 @@ export class TransactionApplicationService {
       );
     }
 
-    // Both INCOME and EXPENSE require a categoryId to satisfy the
-    // ledger_entries XOR constraint (exactly one of account_id /
-    // category_id is set on each entry, and the category-side entry
-    // must have categoryId non-null).
+    // Both INCOME and EXPENSE require a categoryId — enforced by the
+    // application service so the category-side ledger entry has a
+    // non-null category_id (the DB XOR constraint only enforces that
+    // exactly one of {account_id, category_id} is set per entry; it
+    // does not force a category-side entry to exist).
     if (input.categoryId === undefined || input.categoryId === null) {
       return fail("INVALID_INPUT", `${type.toLowerCase()} transactions require a category`);
     }
@@ -149,10 +150,13 @@ export class TransactionApplicationService {
       }
     }
 
-    if (categoryId !== null) {
+    if (categoryId !== null && result.created) {
       // Favorites rise to the front: best-effort. We do not surface a
       // failure here because the transaction is already posted; the
       // favorite is presentation metadata, not ledger truth.
+      // Only bump use_count on a fresh post — idempotent retries
+      // (created=false) must not inflate the per-member favorite count,
+      // since no new financial fact was posted.
       try {
         await this.categoryRepo.recordCategoryUse(input.memberId, categoryId);
       } catch {
