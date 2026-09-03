@@ -57,18 +57,23 @@ export interface UnreconciledAccount {
 /**
  * Fields required to record a reconciliation.
  *
- * `currencyCode` is intentionally absent: the reconciliation is always
- * in the linked account's currency. Cross-currency reconciliations
- * cannot occur because every ledger entry's currency_code is FK'd to
- * currencies and the account row fixes the currency for the row.
+ * `currencyCode` is the currency the caller reports the bank-confirmed
+ * balance in. The service validates that it matches the linked account's
+ * currency — cross-currency reconciliations are rejected with
+ * CURRENCY_MISMATCH because the cleared balance is computed only in the
+ * account's currency (SPEC §7 "different currencies are never
+ * aggregated"). When omitted, the account's currency is assumed.
  *
  * `confirmedAt` is a strict ISO-8601 datetime string
- * ("YYYY-MM-DDTHH:MM:SS.sssZ" or "YYYY-MM-DDTHH:MM:SSZ"). The
- * application service validates it as a real instant in time.
+ * ("YYYY-MM-DDTHH:MM:SS[.sss][Z|±HH:MM]"). The application service
+ * validates it as a real instant in time and canonicalizes it to
+ * UTC ("YYYY-MM-DDTHH:MM:SS.sssZ") before persistence so mixed-offset
+ * instants order correctly in SQL string comparisons.
  */
 export interface PostReconciliationInput {
   readonly memberId: number;
   readonly accountId: number;
+  readonly currencyCode?: string;
   readonly bankConfirmedBalanceMinor: number;
   readonly confirmedAt: string;
   readonly evidenceRef?: string;

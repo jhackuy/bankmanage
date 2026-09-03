@@ -14,7 +14,8 @@
  *      by inserting an adjustment." — the service returns the explicit
  *      `differenceMinor` and never creates a transaction.
  *   - "Different currencies are never aggregated" — the cleared balance
- *      is computed in the account's currency only.
+ *      is computed in the account's currency only, and a request that
+ *      declares a different currency is rejected with CURRENCY_MISMATCH.
  *
  * Idempotency:
  *   - `idempotency_key` UNIQUE constraint is the race-safe boundary for
@@ -25,6 +26,14 @@
  *     hide a client bug and break audit traceability (mirrors the
  *     transactions service pattern).
  *
+ * Timestamp canonicalization:
+ *   - `confirmedAt` is validated as a real ISO-8601 instant and then
+ *     canonicalized to UTC ("YYYY-MM-DDTHH:MM:SS.sssZ"). The stored row
+ *     uses the canonical form, so SQL string ordering on `confirmed_at`
+ *     is correct regardless of the caller's submitted offset. The
+ *     idempotency identity uses the canonical form too, so mixed-offset
+ *     retries of the same instant collapse to the same identity.
+ *
  * Immutability / history:
  *   - Reconciliations are append-only. The cleared balance and
  *     difference are stored at write time as an immutable snapshot so
@@ -33,8 +42,11 @@
  *   - Posted ledger facts are never mutated by the reconciliation flow.
  *
  * Authorization (SPEC §2 two-user model):
- *   - The service rejects cross-member reconciliations (ACCOUNT_FORBIDDEN).
+ *   - Writes reject cross-member reconciliations (ACCOUNT_FORBIDDEN).
  *   - Inactive members and inactive / archived accounts are rejected.
+ *   - Reads are member-scoped: every read takes the requesting
+ *     `memberId` and rejects access to reconciliations owned by a
+ *     different member.
  */
 
 import type { AccountRepository } from "../accounts/repository.js";
@@ -77,6 +89,7 @@ export class ReconciliationApplicationService {
   ): Promise<ServiceResult<RecordReconciliationResult>> {
     const validation = validateInput(input);
     if (!validation.ok) return validation;
+    const canonicalConfirmedAt = validation.value;
 
     const memberCheck = await this.requireActiveMember(input.memberId);
     if (!memberCheck.ok) return memberCheck;
@@ -93,6 +106,12 @@ export class ReconciliationApplicationService {
     }
     if (account.archived === 1) {
       return fail("ACCOUNT_INACTIVE", `account ${input.accountId} is archived`);
+    }
+    if (input.currencyCode !== undefined && input.currencyCode !== account.currencyCode) {
+      return fail(
+        "CURRENCY_MISMATCH",
+        `account currency ${account.currencyCode} does not match request currency ${input.currencyCode}`
+      );
     }
 
     // Deterministic cleared balance in integer minor units for the
@@ -122,7 +141,7 @@ export class ReconciliationApplicationService {
         bankConfirmedBalanceMinor: input.bankConfirmedBalanceMinor,
         clearedBalanceMinor: clearedBalance,
         differenceMinor: difference,
-        confirmedAt: input.confirmedAt,
+        confirmedAt: canonicalConfirmedAt,
         evidenceRef: input.evidenceRef ?? null,
         idempotencyKey: input.idempotencyKey,
       });
@@ -134,7 +153,7 @@ export class ReconciliationApplicationService {
     // is a typed conflict — silently returning the old record would
     // hide a client bug and break audit traceability.
     if (!ensured.created) {
-      const inputIdentity = reconciliationRequestIdentity(input);
+      const inputIdentity = reconciliationRequestIdentity(input, canonicalConfirmedAt);
       const storedIdentity = storedReconciliationIdentity(ensured.record);
       if (inputIdentity !== storedIdentity) {
         return fail(
@@ -149,34 +168,66 @@ export class ReconciliationApplicationService {
 
   // ── Reads ─────────────────────────────────────────────────────────────────
 
-  async getReconciliation(id: number): Promise<ServiceResult<ReconciliationRecord | null>> {
+  async getReconciliation(id: number, memberId: number): Promise<ServiceResult<ReconciliationRecord | null>> {
     if (!Number.isSafeInteger(id) || id <= 0) {
       return fail("INVALID_INPUT", "reconciliation id must be a positive safe integer");
     }
-    return ok(await this.repo.findById(id));
+    if (!Number.isSafeInteger(memberId) || memberId <= 0) {
+      return fail("INVALID_INPUT", "memberId must be a positive safe integer");
+    }
+    const memberCheck = await this.requireActiveMember(memberId);
+    if (!memberCheck.ok) return memberCheck;
+    const record = await this.repo.findById(id);
+    if (record !== null && record.memberId !== memberId) {
+      return fail("ACCOUNT_FORBIDDEN", `reconciliation ${id} is not owned by member ${memberId}`);
+    }
+    return ok(record);
   }
 
-  async getLatestForAccount(accountId: number): Promise<ServiceResult<ReconciliationRecord | null>> {
+  async getLatestForAccount(
+    accountId: number,
+    memberId: number
+  ): Promise<ServiceResult<ReconciliationRecord | null>> {
     if (!Number.isSafeInteger(accountId) || accountId <= 0) {
       return fail("INVALID_INPUT", "accountId must be a positive safe integer");
     }
+    if (!Number.isSafeInteger(memberId) || memberId <= 0) {
+      return fail("INVALID_INPUT", "memberId must be a positive safe integer");
+    }
+    const memberCheck = await this.requireActiveMember(memberId);
+    if (!memberCheck.ok) return memberCheck;
     const account = await this.accountRepo.loadAccountContext(accountId);
     if (account === null) {
       return fail("ACCOUNT_NOT_FOUND", `account ${accountId} not found`);
+    }
+    if (account.memberId !== memberId) {
+      return fail("ACCOUNT_FORBIDDEN", `account ${accountId} is not owned by member ${memberId}`);
     }
     return ok(await this.repo.getLatestForAccount(accountId));
   }
 
-  async listForAccount(accountId: number, limit?: number): Promise<ServiceResult<ReconciliationRecord[]>> {
+  async listForAccount(
+    accountId: number,
+    memberId: number,
+    limit?: number
+  ): Promise<ServiceResult<ReconciliationRecord[]>> {
     if (!Number.isSafeInteger(accountId) || accountId <= 0) {
       return fail("INVALID_INPUT", "accountId must be a positive safe integer");
+    }
+    if (!Number.isSafeInteger(memberId) || memberId <= 0) {
+      return fail("INVALID_INPUT", "memberId must be a positive safe integer");
     }
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) {
       return fail("INVALID_INPUT", "limit must be a positive safe integer when provided");
     }
+    const memberCheck = await this.requireActiveMember(memberId);
+    if (!memberCheck.ok) return memberCheck;
     const account = await this.accountRepo.loadAccountContext(accountId);
     if (account === null) {
       return fail("ACCOUNT_NOT_FOUND", `account ${accountId} not found`);
+    }
+    if (account.memberId !== memberId) {
+      return fail("ACCOUNT_FORBIDDEN", `account ${accountId} is not owned by member ${memberId}`);
     }
     return ok(await this.repo.listForAccount(accountId, limit));
   }
@@ -238,7 +289,13 @@ export class ReconciliationApplicationService {
 
 // ── Pure validators / helpers ──────────────────────────────────────────────
 
-function validateInput(input: PostReconciliationInput): ServiceResult<true> {
+/**
+ * Validate `PostReconciliationInput` and return the canonical UTC
+ * `confirmedAt` to use for persistence and identity comparison. The
+ * canonical form ("YYYY-MM-DDTHH:MM:SS.sssZ") makes SQL string ordering
+ * correct for mixed-offset instants.
+ */
+function validateInput(input: PostReconciliationInput): ServiceResult<string> {
   if (!Number.isSafeInteger(input.memberId) || input.memberId <= 0) {
     return fail("INVALID_INPUT", "memberId must be a positive safe integer");
   }
@@ -247,6 +304,11 @@ function validateInput(input: PostReconciliationInput): ServiceResult<true> {
   }
   if (!Number.isSafeInteger(input.bankConfirmedBalanceMinor)) {
     return fail("INVALID_INPUT", "bankConfirmedBalanceMinor must be a safe integer");
+  }
+  if (input.currencyCode !== undefined) {
+    if (typeof input.currencyCode !== "string" || input.currencyCode.length === 0) {
+      return fail("INVALID_INPUT", "currencyCode must be a non-empty string when provided");
+    }
   }
   if (typeof input.confirmedAt !== "string") {
     return fail("INVALID_INPUT", "confirmedAt must be a string");
@@ -264,14 +326,13 @@ function validateInput(input: PostReconciliationInput): ServiceResult<true> {
   // (e.g. "2026-02-30T00:00:00Z"). JavaScript's Date constructor silently
   // rolls overflowed days into the next month, so NaN-checks alone miss
   // this — we must validate the calendar fields directly.
-  const [, yStr, moStr, dStr, hStr, miStr, sStr, fracStr] = dateMatch;
+  const [, yStr, moStr, dStr, hStr, miStr, sStr] = dateMatch;
   const year = Number(yStr);
   const month = Number(moStr);
   const day = Number(dStr);
   const hour = Number(hStr);
   const minute = Number(miStr);
   const second = Number(sStr);
-  const fracMs = fracStr === undefined ? 0 : Number(fracStr.padEnd(3, "0").slice(0, 3));
   if (month < 1 || month > 12) {
     return fail("INVALID_INPUT", `confirmedAt is not a valid datetime: ${input.confirmedAt}`);
   }
@@ -279,20 +340,25 @@ function validateInput(input: PostReconciliationInput): ServiceResult<true> {
   if (day < 1 || day > daysInMonth) {
     return fail("INVALID_INPUT", `confirmedAt is not a valid datetime: ${input.confirmedAt}`);
   }
-  if (hour > 23 || minute > 59 || second > 59 || fracMs > 999) {
+  if (hour > 23 || minute > 59 || second > 59) {
     return fail("INVALID_INPUT", `confirmedAt is not a valid datetime: ${input.confirmedAt}`);
   }
   const parsed = new Date(input.confirmedAt);
   if (Number.isNaN(parsed.getTime())) {
     return fail("INVALID_INPUT", `confirmedAt is not a valid datetime: ${input.confirmedAt}`);
   }
+  // Canonicalize to UTC ISO-8601 so mixed-offset instants collapse to
+  // the same storage form. This is what gets written to the row and
+  // used in the idempotency identity, so SQL string ordering on
+  // `confirmed_at` is correct for any offset the caller submitted.
+  const canonical = parsed.toISOString();
   if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.length === 0) {
     return fail("INVALID_INPUT", "idempotencyKey must be a non-empty string");
   }
   if (input.evidenceRef !== undefined && typeof input.evidenceRef !== "string") {
     return fail("INVALID_INPUT", "evidenceRef must be a string when provided");
   }
-  return ok(true);
+  return ok(canonical);
 }
 
 /**
@@ -302,9 +368,22 @@ function validateInput(input: PostReconciliationInput): ServiceResult<true> {
  * computed from the ledger snapshot at write time and are NOT part of
  * the input identity — a retry of the same bank payload must yield the
  * stored record (created=false), even if the ledger has since changed.
+ *
+ * `confirmedAt` is compared in canonical UTC form. `currencyCode` is
+ * the caller-declared currency as supplied (or the empty string when
+ * omitted) — NOT the account's currency, so a retry that omits
+ * `currencyCode` produces a different identity from a prior write that
+ * declared it. The service validates that the declared currency (when
+ * present) matches the account's currency upstream.
  */
-function reconciliationRequestIdentity(input: PostReconciliationInput): string {
-  return [input.accountId, input.bankConfirmedBalanceMinor, input.confirmedAt, input.evidenceRef ?? "null"]
+function reconciliationRequestIdentity(input: PostReconciliationInput, canonicalConfirmedAt: string): string {
+  return [
+    input.accountId,
+    input.currencyCode ?? "",
+    input.bankConfirmedBalanceMinor,
+    canonicalConfirmedAt,
+    input.evidenceRef ?? "null",
+  ]
     .map((v) => String(v))
     .join("|");
 }
@@ -316,10 +395,13 @@ function reconciliationRequestIdentity(input: PostReconciliationInput): string {
  *
  * `clearedBalanceMinor` / `differenceMinor` are NOT included — they
  * belong to the snapshot at write time, not to the request identity.
+ * `confirmedAt` is already canonical (the service writes the canonical
+ * form) and `currencyCode` is the stored snapshot value.
  */
 function storedReconciliationIdentity(record: ReconciliationRecord): string {
   return [
     record.accountId,
+    record.currencyCode,
     record.bankConfirmedBalanceMinor,
     record.confirmedAt,
     record.evidenceRef ?? "null",

@@ -898,7 +898,7 @@ describe("history preservation", () => {
     const rows = await countRows("SELECT COUNT(*) AS c FROM account_reconciliations");
     expect(rows).toBe(3);
 
-    const list = await reconciliationService.listForAccount(s.accountId);
+    const list = await reconciliationService.listForAccount(s.accountId, s.memberId);
     expect(list.ok).toBe(true);
     if (!list.ok) return;
     expect(list.value).toHaveLength(3);
@@ -921,7 +921,7 @@ describe("history preservation", () => {
         })
       );
     }
-    const list = await reconciliationService.listForAccount(s.accountId, 3);
+    const list = await reconciliationService.listForAccount(s.accountId, s.memberId, 3);
     expect(list.ok).toBe(true);
     if (!list.ok) return;
     expect(list.value).toHaveLength(3);
@@ -951,7 +951,7 @@ describe("history preservation", () => {
     // reconciliation row must NOT change.
     await postExpense(7_000, s.accountId, s.memberId, "imm-exp-2", s.expenseCategoryId);
 
-    const reread = await reconciliationService.getReconciliation(r1.value.record.id);
+    const reread = await reconciliationService.getReconciliation(r1.value.record.id, s.memberId);
     expect(reread.ok).toBe(true);
     if (!reread.ok || reread.value === null) return;
     expect(reread.value.clearedBalanceMinor).toBe(-15_000);
@@ -1052,7 +1052,7 @@ describe("atomicity / zero partial state", () => {
 describe("getLatestForAccount", () => {
   it("returns null when the account has never been reconciled", async () => {
     const s = await loadSeed(db);
-    const r = await reconciliationService.getLatestForAccount(s.accountId);
+    const r = await reconciliationService.getLatestForAccount(s.accountId, s.memberId);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value).toBeNull();
@@ -1088,7 +1088,7 @@ describe("getLatestForAccount", () => {
       })
     );
 
-    const latest = await reconciliationService.getLatestForAccount(s.accountId);
+    const latest = await reconciliationService.getLatestForAccount(s.accountId, s.memberId);
     expect(latest.ok).toBe(true);
     if (!latest.ok || latest.value === null) return;
     expect(latest.value.bankConfirmedBalanceMinor).toBe(30_000);
@@ -1096,14 +1096,14 @@ describe("getLatestForAccount", () => {
   });
 
   it("rejects non-positive accountId", async () => {
-    const r = await reconciliationService.getLatestForAccount(0);
+    const r = await reconciliationService.getLatestForAccount(0, 1);
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("INVALID_INPUT");
   });
 
   it("rejects unknown account with ACCOUNT_NOT_FOUND", async () => {
-    const r = await reconciliationService.getLatestForAccount(999_999_999);
+    const r = await reconciliationService.getLatestForAccount(999_999_999, 1);
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("ACCOUNT_NOT_FOUND");
@@ -1113,7 +1113,7 @@ describe("getLatestForAccount", () => {
 describe("listForAccount", () => {
   it("returns an empty list when the account has no reconciliations", async () => {
     const s = await loadSeed(db);
-    const r = await reconciliationService.listForAccount(s.accountId);
+    const r = await reconciliationService.listForAccount(s.accountId, s.memberId);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value).toHaveLength(0);
@@ -1121,7 +1121,7 @@ describe("listForAccount", () => {
 
   it("rejects non-positive limit", async () => {
     const s = await loadSeed(db);
-    const r = await reconciliationService.listForAccount(s.accountId, 0);
+    const r = await reconciliationService.listForAccount(s.accountId, s.memberId, 0);
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("INVALID_INPUT");
@@ -1238,5 +1238,307 @@ describe("service wiring", () => {
       })
     );
     expect(r.ok).toBe(true);
+  });
+});
+
+// ── Request currency mismatch (CURRENCY_MISMATCH boundary) ─────────────────
+
+describe("request currency mismatch", () => {
+  it("rejects a request whose currencyCode differs from the account currency", async () => {
+    const s = await loadSeed(db);
+    const r = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        currencyCode: "EUR",
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "currency-mismatch-req-1",
+      })
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("CURRENCY_MISMATCH");
+    const rows = await countRows("SELECT COUNT(*) AS c FROM account_reconciliations");
+    expect(rows).toBe(0);
+  });
+
+  it("accepts a request whose currencyCode matches the account currency", async () => {
+    const s = await loadSeed(db);
+    const r = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        currencyCode: "PHP",
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "currency-match-1",
+      })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.record.currencyCode).toBe("PHP");
+  });
+
+  it("rejects an empty currencyCode string as INVALID_INPUT", async () => {
+    const s = await loadSeed(db);
+    const r = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        currencyCode: "",
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "currency-empty-1",
+      })
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
+
+  it("currencyCode is part of the idempotency identity: mismatch surfaces IDEMPOTENCY_CONFLICT", async () => {
+    const s = await loadSeed(db);
+    const first = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        currencyCode: "PHP",
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "idem-currency-1",
+      })
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Same key, same bank balance, same confirmedAt — but currencyCode
+    // omitted this time. The request identity must differ (request has
+    // no declared currency, stored has "PHP") so a retry surfaces
+    // IDEMPOTENCY_CONFLICT rather than silently returning the prior row.
+    const conflict = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "idem-currency-1",
+      })
+    );
+    expect(conflict.ok).toBe(false);
+    if (conflict.ok) return;
+    expect(conflict.error.code).toBe("IDEMPOTENCY_CONFLICT");
+
+    const rows = await countRows("SELECT COUNT(*) AS c FROM account_reconciliations");
+    expect(rows).toBe(1);
+  });
+});
+
+// ── Member-scoped authorized reads ──────────────────────────────────────────
+
+describe("member-scoped authorized reads", () => {
+  it("getReconciliation rejects a member who does not own the record", async () => {
+    const s = await loadSeed(db);
+    const write = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "scoped-read-1",
+      })
+    );
+    expect(write.ok).toBe(true);
+    if (!write.ok) return;
+
+    const r = await reconciliationService.getReconciliation(write.value.record.id, s.otherMemberId);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("ACCOUNT_FORBIDDEN");
+  });
+
+  it("getReconciliation returns the record for the owning member", async () => {
+    const s = await loadSeed(db);
+    const write = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "scoped-read-2",
+      })
+    );
+    expect(write.ok).toBe(true);
+    if (!write.ok) return;
+
+    const r = await reconciliationService.getReconciliation(write.value.record.id, s.memberId);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).not.toBeNull();
+    expect(r.value?.id).toBe(write.value.record.id);
+  });
+
+  it("getReconciliation rejects non-positive memberId as INVALID_INPUT", async () => {
+    const r = await reconciliationService.getReconciliation(1, 0);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
+
+  it("getReconciliation rejects an inactive member with MEMBER_INACTIVE", async () => {
+    const s = await loadSeed(db);
+    const write = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "scoped-read-3",
+      })
+    );
+    expect(write.ok).toBe(true);
+    if (!write.ok) return;
+
+    await db.prepare("UPDATE household_members SET active = 0 WHERE id = ?").bind(s.memberId).run();
+
+    const r = await reconciliationService.getReconciliation(write.value.record.id, s.memberId);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("MEMBER_INACTIVE");
+  });
+
+  it("getLatestForAccount rejects cross-member access", async () => {
+    const s = await loadSeed(db);
+    await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "scoped-latest-1",
+      })
+    );
+
+    const r = await reconciliationService.getLatestForAccount(s.accountId, s.otherMemberId);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("ACCOUNT_FORBIDDEN");
+  });
+
+  it("listForAccount rejects cross-member access", async () => {
+    const s = await loadSeed(db);
+    await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        idempotencyKey: "scoped-list-1",
+      })
+    );
+
+    const r = await reconciliationService.listForAccount(s.accountId, s.otherMemberId);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("ACCOUNT_FORBIDDEN");
+  });
+
+  it("getLatestForAccount rejects non-positive memberId as INVALID_INPUT", async () => {
+    const r = await reconciliationService.getLatestForAccount(1, 0);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
+
+  it("listForAccount rejects non-positive memberId as INVALID_INPUT", async () => {
+    const r = await reconciliationService.listForAccount(1, 0);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("INVALID_INPUT");
+  });
+});
+
+// ── Canonical timestamp ordering with mixed offsets ─────────────────────────
+
+describe("canonical timestamp ordering with mixed offsets", () => {
+  it("canonicalizes a +08:00 offset to UTC on the stored row", async () => {
+    const s = await loadSeed(db);
+    const r = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        confirmedAt: "2026-03-15T18:00:00+08:00",
+        idempotencyKey: "canonical-1",
+      })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // 2026-03-15T18:00:00+08:00 === 2026-03-15T10:00:00Z
+    expect(r.value.record.confirmedAt).toBe("2026-03-15T10:00:00.000Z");
+  });
+
+  it("mixed-offset retries of the same instant collapse to the same identity", async () => {
+    const s = await loadSeed(db);
+    // First write in UTC.
+    const first = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        confirmedAt: "2026-03-15T10:00:00Z",
+        idempotencyKey: "mixed-offset-idem-1",
+      })
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Retry with the same instant expressed in +08:00. The canonical
+    // UTC form is identical, so the request identity matches and the
+    // retry returns the existing record with created=false.
+    const retry = await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 0,
+        confirmedAt: "2026-03-15T18:00:00+08:00",
+        idempotencyKey: "mixed-offset-idem-1",
+      })
+    );
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.value.created).toBe(false);
+    expect(retry.value.record.id).toBe(first.value.record.id);
+
+    const rows = await countRows("SELECT COUNT(*) AS c FROM account_reconciliations");
+    expect(rows).toBe(1);
+  });
+
+  it("listForAccount orders mixed-offset instants chronologically (not lexically)", async () => {
+    const s = await loadSeed(db);
+    // Two reconciliations at the same logical instant, one submitted
+    // with a +08:00 offset. Both canonicalize to the same UTC form, so
+    // the list must keep the relative order, and an earlier instant
+    // must come after a later one regardless of how the caller wrote
+    // the offset.
+    await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 10_000,
+        confirmedAt: "2026-03-15T10:00:00Z", // = 2026-03-15T18:00:00+08:00
+        idempotencyKey: "mixed-order-1",
+      })
+    );
+    await reconciliationService.recordReconciliation(
+      reconcile({
+        memberId: s.memberId,
+        accountId: s.accountId,
+        bankConfirmedBalanceMinor: 20_000,
+        confirmedAt: "2026-03-15T11:00:00Z", // later by 1 hour
+        idempotencyKey: "mixed-order-2",
+      })
+    );
+
+    const list = await reconciliationService.listForAccount(s.accountId, s.memberId);
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    // Newest first — the 11:00Z row precedes the 10:00Z row regardless
+    // of how the offsets were submitted.
+    expect(list.value[0]?.bankConfirmedBalanceMinor).toBe(20_000);
+    expect(list.value[1]?.bankConfirmedBalanceMinor).toBe(10_000);
+    // Both rows are stored in canonical UTC.
+    expect(list.value[0]?.confirmedAt).toBe("2026-03-15T11:00:00.000Z");
+    expect(list.value[1]?.confirmedAt).toBe("2026-03-15T10:00:00.000Z");
   });
 });
