@@ -313,25 +313,32 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           NEW_HEAD: ${{ steps.push.outputs.head }}
           CHANGED: ${{ steps.push.outputs.changed }}
+          VALIDATION_OUTCOME: ${{ steps.final_validation.outcome }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.final_validation.outcome }}" = "success" ]; then
-            RESULT="Full deterministic validation passed; independent CI was dispatched from trusted main for this exact SHA."
-          elif [ "$CHANGED" = "true" ]; then
-            RESULT="Partial repair progress was preserved on the same PR branch, but final deterministic validation failed. Independent CI was not dispatched and merge remains blocked."
-          else
-            RESULT="Final deterministic validation failed and no repository changes were produced. Independent CI was not dispatched and merge remains blocked."
-          fi
+          case "${VALIDATION_OUTCOME}:${CHANGED}" in
+            success:*) RESULT="Full deterministic validation passed; independent CI was dispatched from trusted main for this exact SHA." ;;
+            failure:true) RESULT="Partial repair progress was preserved on the same PR branch, but final deterministic validation failed. Independent CI was not dispatched and merge remains blocked." ;;
+            failure:false) RESULT="Final deterministic validation failed and no repository changes were produced. Independent CI was not dispatched and merge remains blocked." ;;
+            failure:*) RESULT="Final deterministic validation failed; repository change/push state is unavailable. Independent CI was not dispatched and merge remains blocked." ;;
+            *:true) RESULT="Final deterministic validation outcome was ${VALIDATION_OUTCOME}; partial repository changes were pushed but are not validated. Independent CI was not dispatched and merge remains blocked." ;;
+            *:false) RESULT="Final deterministic validation outcome was ${VALIDATION_OUTCOME}; no repository changes were produced. Independent CI was not dispatched and merge remains blocked." ;;
+            *) RESULT="Final deterministic validation outcome was ${VALIDATION_OUTCOME}; repository change/push state is unavailable. Independent CI was not dispatched and merge remains blocked." ;;
+          esac
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "[BANKMANAGE-CLAUDE-PR-REPAIR] Existing-PR repair completed in place. Repository changes: ${CHANGED}. Current head: \`${NEW_HEAD}\`. ${RESULT} No duplicate branch or PR was created."
 
       - name: Enforce final validation outcome
         if: always() && steps.final_validation.outcome != 'success'
         env:
           CHANGED: ${{ steps.push.outputs.changed }}
+          VALIDATION_OUTCOME: ${{ steps.final_validation.outcome }}
         run: |
-          if [ "$CHANGED" = "true" ]; then
-            echo "Final deterministic validation failed; partial progress was preserved on the existing PR branch." >&2
-          else
-            echo "Final deterministic validation failed; no repository changes were produced." >&2
-          fi
+          case "${VALIDATION_OUTCOME}:${CHANGED}" in
+            failure:true) echo "Final deterministic validation failed; partial progress was preserved on the existing PR branch." >&2 ;;
+            failure:false) echo "Final deterministic validation failed; no repository changes were produced." >&2 ;;
+            failure:*) echo "Final deterministic validation failed; repository change/push state is unavailable." >&2 ;;
+            *:true) echo "Final deterministic validation outcome was ${VALIDATION_OUTCOME}; partial repository changes were pushed but are not validated." >&2 ;;
+            *:false) echo "Final deterministic validation outcome was ${VALIDATION_OUTCOME}; no repository changes were produced." >&2 ;;
+            *) echo "Final deterministic validation outcome was ${VALIDATION_OUTCOME}; repository change/push state is unavailable." >&2 ;;
+          esac
           exit 1
