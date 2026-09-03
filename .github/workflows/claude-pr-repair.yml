@@ -142,7 +142,7 @@ jobs:
           set -e
           if [ "$CLAUDE_STATUS" -ne 0 ]; then
             echo "::error::Claude repair exited with status $CLAUDE_STATUS"
-            test ! -s .agent-task/claude-repair.stderr || sed -n '1,160p' .agent-task/claude-repair.stderr
+            test ! -s .agent-task/claude-repair.stderr || sed -n '1,160p' .agent-task/claude-repair.stderr | sed 's/^/[claude-stderr] /' >&2
             if [ -s .agent-task/claude-repair.json ]; then
               node - <<'NODE'
           const fs = require("fs");
@@ -199,8 +199,8 @@ jobs:
           set -e
           if [ "$CLAUDE_STATUS" -ne 0 ]; then
             echo "::error::Claude failure-only repair exited with status $CLAUDE_STATUS"
-            test ! -s .agent-task/claude-repair-2.stderr || sed -n '1,160p' .agent-task/claude-repair-2.stderr
-            test ! -s .agent-task/claude-repair-2.json || tail -c 2000 .agent-task/claude-repair-2.json >&2
+            test ! -s .agent-task/claude-repair-2.stderr || sed -n '1,160p' .agent-task/claude-repair-2.stderr | sed 's/^/[claude-stderr] /' >&2
+            test ! -s .agent-task/claude-repair-2.json || tail -c 2000 .agent-task/claude-repair-2.json | sed 's/^/[claude-json] /' >&2
             exit "$CLAUDE_STATUS"
           fi
 
