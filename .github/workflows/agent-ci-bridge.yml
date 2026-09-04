@@ -40,6 +40,9 @@ jobs:
           RUN_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")
           RUN_NAME=$(jq -r '.name' <<<"$RUN_JSON")
           RUN_CONCLUSION=$(jq -r '.conclusion // empty' <<<"$RUN_JSON")
+          RUN_EVENT=$(jq -r '.event // empty' <<<"$RUN_JSON")
+          RUN_ACTOR=$(jq -r '.actor.login // empty' <<<"$RUN_JSON")
+          REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
 
           test "$RUN_NAME" = "Claude Issue Implementer" || {
             echo "Refusing non-Builder source run: ${RUN_NAME}" >&2
@@ -47,6 +50,14 @@ jobs:
           }
           test "$RUN_CONCLUSION" = "success" || {
             echo "Refusing Builder run without success conclusion: ${RUN_CONCLUSION:-none}" >&2
+            exit 1
+          }
+          test "$RUN_EVENT" = "issue_comment" || {
+            echo "Refusing Builder source run with unexpected event: ${RUN_EVENT:-none}" >&2
+            exit 1
+          }
+          test "$RUN_ACTOR" = "$REPO_OWNER" || {
+            echo "Refusing Builder source run not initiated by repository owner: ${RUN_ACTOR:-none}" >&2
             exit 1
           }
 
