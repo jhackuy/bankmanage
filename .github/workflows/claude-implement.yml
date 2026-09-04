@@ -211,6 +211,7 @@ jobs:
       - name: One micro-repair pass (narrow failures only)
         id: micro_repair
         if: steps.classify.outputs.narrow == 'true' && steps.validation_final.outcome == 'failure'
+        continue-on-error: true
         env:
           ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
@@ -241,9 +242,24 @@ jobs:
             jq '{is_error,subtype,result,errors}' .agent-task/claude-micro-repair.json >&2 || true
             SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-micro-repair.json 2>/dev/null || true)
             REPO_CHANGES=$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**' || true)
-            if [[ "$SUBTYPE" == "error_max_turns" && -n "$REPO_CHANGES" ]]; then
-              echo "Claude micro-repair reached its turn bound with repository changes; continuing to validation." >> "$GITHUB_STEP_SUMMARY"
+            HAS_CHANGES="false"
+            [[ -n "$REPO_CHANGES" ]] && HAS_CHANGES="true"
+            DECISION=$(node scripts/harness-micro-repair-decide.mjs "$CLAUDE_STATUS" "$SUBTYPE" "$HAS_CHANGES") || true
+            ACTION=$(echo "$DECISION" | jq -r '.action // "unknown"')
+            REASON=$(echo "$DECISION" | jq -r '.reason // "unknown"')
+            echo "- micro-repair provider exit: ${CLAUDE_STATUS}; subtype: ${SUBTYPE:-<empty>}; has_changes: ${HAS_CHANGES}; decision: ${ACTION} (${REASON})" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$ACTION" == "continue_with_changes" ]]; then
+              echo "Claude micro-repair provider failed (${SUBTYPE:-no-subtype}) with repository changes; preserving implementation progress and continuing to final validation." >> "$GITHUB_STEP_SUMMARY"
+              echo "failed=true" >> "$GITHUB_OUTPUT"
+              echo "failure_reason=${REASON}" >> "$GITHUB_OUTPUT"
+              jq -n --arg reason "${REASON}" --arg status "${CLAUDE_STATUS}" --arg subtype "${SUBTYPE}" \
+                '{provider_status: ($status|tonumber), subtype: $subtype, decision: "continue_with_changes", reason: $reason}' \
+                > .agent-task/micro-repair-failure.json
             else
+              echo "Claude micro-repair provider failed (${SUBTYPE:-no-subtype}) with no repository changes; nothing to preserve." >> "$GITHUB_STEP_SUMMARY"
+              jq -n --arg reason "${REASON}" --arg status "${CLAUDE_STATUS}" --arg subtype "${SUBTYPE}" \
+                '{provider_status: ($status|tonumber), subtype: $subtype, decision: "exit_no_changes", reason: $reason}' \
+                > .agent-task/micro-repair-failure.json
               exit "$CLAUDE_STATUS"
             fi
           fi
@@ -337,16 +353,23 @@ jobs:
           BRANCH: ${{ steps.task.outputs.branch }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           NARROW_REASON: ${{ steps.classify.outputs.narrow_reason }}
+          MICRO_REPAIR_FAILED: ${{ steps.micro_repair.outputs.failed }}
+          MICRO_REPAIR_REASON: ${{ steps.micro_repair.outputs.failure_reason }}
         run: |
           set -euo pipefail
           FINAL_TAIL=$(tail -n 80 .agent-task/validation-final.log 2>/dev/null || true)
           POST_TAIL=$(tail -n 80 .agent-task/validation-post-micro.log 2>/dev/null || true)
           NARROW_FILES=$(jq -c '.files // []' .agent-task/narrow.json 2>/dev/null || echo '[]')
           CHANGED_PATHS=$(cat .agent-task/changed-paths.txt 2>/dev/null || true)
+          MICRO_NOTE="The harness intentionally stopped after one micro-repair: it never loops on broad failures."
+          if [[ "$MICRO_REPAIR_FAILED" == "true" ]]; then
+            MICRO_NOTE="${MICRO_NOTE} The micro-repair provider itself exited non-zero (decision: \`${MICRO_REPAIR_REASON:-unknown}\`); the harness intentionally preserved the implementation progress instead of dropping it."
+          fi
           printf '%s\n' \
-            "[BANKMANAGE-CLAUDE-IMPL] Implementation branch \`${BRANCH}\` was pushed with substantial validated progress, but the final deterministic validation still failed after the bounded repair pass (and, when applicable, the narrow-failure micro-repair pass). The harness intentionally stopped after one micro-repair: it never loops on broad failures." \
+            "[BANKMANAGE-CLAUDE-IMPL] Implementation branch \`${BRANCH}\` was pushed with substantial validated progress, but the final deterministic validation still failed after the bounded repair pass. ${MICRO_NOTE} The harness never loops: it ran at most one micro-repair pass and stops after that." \
             "" \
             "- narrow classification: \`${NARROW_REASON}\`" \
+            "- micro-repair provider failed: \`${MICRO_REPAIR_FAILED:-false}\` (reason: \`${MICRO_REPAIR_REASON:-n/a}\`)" \
             "- failing files detected: ${NARROW_FILES}" \
             "- preserved task paths:" \
             "${CHANGED_PATHS}" \
@@ -370,6 +393,8 @@ jobs:
             echo "### Harness preservation"
             echo "- branch: ${BRANCH}"
             echo "- narrow_reason: ${NARROW_REASON}"
+            echo "- micro_repair_failed: ${MICRO_REPAIR_FAILED:-false}"
+            echo "- micro_repair_reason: ${MICRO_REPAIR_REASON:-n/a}"
             echo "- failing_files: ${NARROW_FILES}"
             echo "- status: preserved_with_failures (no PR opened)"
           } >> "$GITHUB_STEP_SUMMARY"
