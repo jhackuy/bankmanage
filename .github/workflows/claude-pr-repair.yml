@@ -299,12 +299,14 @@ jobs:
         if: steps.final_validation.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
           TARGET_SHA: ${{ steps.push.outputs.head }}
         run: |
           set -euo pipefail
           test -n "$TARGET_SHA" || { echo "Missing exact target SHA" >&2; exit 1; }
-          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main -f target_sha="$TARGET_SHA"
-          echo "Independent CI dispatch accepted from trusted main for exact SHA ${TARGET_SHA}." >> "$GITHUB_STEP_SUMMARY"
+          test -n "$HEAD_REF" || { echo "Missing PR head ref" >&2; exit 1; }
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF" -f target_sha="$TARGET_SHA"
+          echo "Independent CI dispatch accepted on PR head branch ${HEAD_REF} for exact SHA ${TARGET_SHA}." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report repair result on the existing PR
         if: always() && steps.pr.outputs.pr_number != ''
@@ -317,7 +319,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${VALIDATION_OUTCOME}:${CHANGED}" in
-            success:*) RESULT="Full deterministic validation passed; independent CI was dispatched from trusted main for this exact SHA." ;;
+            success:*) RESULT="Full deterministic validation passed; independent CI was dispatched on the PR head branch for this exact SHA." ;;
             failure:true) RESULT="Partial repair progress was preserved on the same PR branch, but final deterministic validation failed. Independent CI was not dispatched and merge remains blocked." ;;
             failure:false) RESULT="Final deterministic validation failed and no repository changes were produced. Independent CI was not dispatched and merge remains blocked." ;;
             failure:*) RESULT="Final deterministic validation failed; repository change/push state is unavailable. Independent CI was not dispatched and merge remains blocked." ;;
