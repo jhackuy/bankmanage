@@ -17,8 +17,12 @@
  *
  * Authorization (SPEC §2 two-user model):
  *   - The uploader and the owner must both be active members.
- *   - `getAuthorizedBytes` only returns bytes to the owner or the
- *     uploader of that document (cross-member access → DOCUMENT_FORBIDDEN).
+ *   - `getAuthorizedBytes` and `getDocument` accept the requester if they
+ *     are the owner or uploader of that document, OR if the requester
+ *     is a persisted OWNER role (cross-member OWNER access is allowed
+ *     for family coordination). Ordinary MEMBER-role callers are denied
+ *     cross-member access. The role is loaded from `household_members.role`
+ *     by the repository — callers never supply a role.
  *
  * Compensation contract (SPEC §4.3 + §11):
  *   - R2 put failure → no metadata row is ever inserted. The service
@@ -41,6 +45,7 @@ import {
   type AuthorizedDocumentBytes,
   type DocumentKind,
   type DocumentRecord,
+  type MemberContext,
   type ServiceResult,
   type UploadDocumentInput,
   type UploadDocumentResult,
@@ -218,16 +223,23 @@ export class DocumentApplicationService {
 
     const memberCheck = await this.requireActiveMember(memberId, "requester");
     if (!memberCheck.ok) return memberCheck;
+    const requester = memberCheck.value;
 
     const record = await this.repo.findById(id);
     if (record === null) {
       return fail("DOCUMENT_NOT_FOUND", `document ${id} not found`);
     }
 
-    // Two-user authorization: requester must be either the owner or the
-    // uploader of THIS specific document. Cross-member access is
-    // rejected even if both members are individually active.
-    if (record.ownerMemberId !== memberId && record.uploaderMemberId !== memberId) {
+    // Two-user authorization (SPEC §2):
+    //   - The requester must be the owner or the uploader of THIS
+    //     specific document, OR
+    //   - The requester must be a persisted OWNER. Persisted OWNERs may
+    //     read any household member's documents for family coordination.
+    // MEMBER-role callers are denied cross-member access; only the
+    // document's own owner or uploader can read it.
+    const isOwnerOrUploader = record.ownerMemberId === memberId || record.uploaderMemberId === memberId;
+    const isOwnerRole = requester.role === "OWNER";
+    if (!isOwnerOrUploader && !isOwnerRole) {
       return fail("DOCUMENT_FORBIDDEN", `document ${id} is not accessible to member ${memberId}`);
     }
 
@@ -267,10 +279,15 @@ export class DocumentApplicationService {
     }
     const memberCheck = await this.requireActiveMember(memberId, "requester");
     if (!memberCheck.ok) return memberCheck;
+    const requester = memberCheck.value;
 
     const record = await this.repo.findById(id);
     if (record === null) return ok(null);
-    if (record.ownerMemberId !== memberId && record.uploaderMemberId !== memberId) {
+    // Same authorization rule as `getAuthorizedBytes`: owner-or-uploader
+    // of the document, or a persisted OWNER role, may read the metadata.
+    const isOwnerOrUploader = record.ownerMemberId === memberId || record.uploaderMemberId === memberId;
+    const isOwnerRole = requester.role === "OWNER";
+    if (!isOwnerOrUploader && !isOwnerRole) {
       return fail("DOCUMENT_FORBIDDEN", `document ${id} is not accessible to member ${memberId}`);
     }
     return ok(record);
@@ -312,7 +329,7 @@ export class DocumentApplicationService {
   private async requireActiveMember(
     memberId: number,
     role: "owner" | "uploader" | "requester"
-  ): Promise<ServiceResult<true>> {
+  ): Promise<ServiceResult<MemberContext>> {
     if (!Number.isSafeInteger(memberId) || memberId <= 0) {
       return fail("INVALID_INPUT", `${role} memberId must be a positive safe integer`);
     }
@@ -323,7 +340,7 @@ export class DocumentApplicationService {
     if (ctx.active !== 1) {
       return fail("MEMBER_INACTIVE", `${role} member ${memberId} is inactive`);
     }
-    return ok(true);
+    return ok(ctx);
   }
 }
 

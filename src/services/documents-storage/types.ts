@@ -132,14 +132,25 @@ export type ServiceErrorCode =
   | "INTERNAL";
 
 /**
+ * The two pilot roles persisted on `household_members.role` (CHECK
+ * constraint from migration 0001). Mirrors the literal union declared in
+ * the schema. The documents-storage service uses the role to authorize
+ * cross-member document access (OWNER may read another member's
+ * documents; MEMBER may not).
+ */
+export type MemberRole = "OWNER" | "MEMBER";
+
+/**
  * Minimal member context loaded by the repository for the application
- * service's active-state checks. Mirrors the shape used by the accounts
- * and term-deposit repositories so the same `requireActiveMember` pattern
- * is reusable.
+ * service's active-state and role checks. Mirrors the shape used by the
+ * accounts and term-deposit repositories so the same `requireActiveMember`
+ * pattern is reusable, plus the persisted role loaded directly from the
+ * `household_members` row (never from a caller-supplied input).
  */
 export interface MemberContext {
   readonly memberId: number;
   readonly active: number;
+  readonly role: MemberRole;
 }
 
 export function serviceError(code: ServiceErrorCode, message: string): ServiceError {

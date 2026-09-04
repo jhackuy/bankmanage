@@ -46,6 +46,8 @@ interface Seed {
   ownerId: number;
   uploaderId: number;
   otherId: number;
+  /** MEMBER-role active member (neither owner nor uploader of any doc). */
+  memberId: number;
   inactiveId: number;
 }
 
@@ -100,7 +102,8 @@ beforeEach(async () => {
   storage = new FakeDocumentStorageAdapter();
   service = new DocumentApplicationService(repo, storage);
 
-  // Two active household members (OWNER + MEMBER) plus one inactive.
+  // Two active household members (OWNER + MEMBER) plus one OWNER, one
+  // ordinary MEMBER for cross-member access tests, and one inactive.
   const owner = await db
     .prepare("INSERT INTO household_members (role, display_name) VALUES (?, ?)")
     .bind("OWNER", "Docs Test Owner")
@@ -111,7 +114,11 @@ beforeEach(async () => {
     .run();
   const other = await db
     .prepare("INSERT INTO household_members (role, display_name) VALUES (?, ?)")
-    .bind("OWNER", "Docs Test Other")
+    .bind("OWNER", "Docs Test Other Owner")
+    .run();
+  const member = await db
+    .prepare("INSERT INTO household_members (role, display_name) VALUES (?, ?)")
+    .bind("MEMBER", "Docs Test Other Member")
     .run();
   const inactive = await db
     .prepare("INSERT INTO household_members (role, display_name, active) VALUES (?, ?, 0)")
@@ -122,6 +129,7 @@ beforeEach(async () => {
     ownerId: Number(owner.meta.last_row_id),
     uploaderId: Number(uploader.meta.last_row_id),
     otherId: Number(other.meta.last_row_id),
+    memberId: Number(member.meta.last_row_id),
     inactiveId: Number(inactive.meta.last_row_id),
   };
   seedOwner = seed;
@@ -350,7 +358,7 @@ describe("authorization", () => {
     expect(await countDocs()).toBe(0);
   });
 
-  it("getAuthorizedBytes rejects a member who is neither owner nor uploader", async () => {
+  it("getAuthorizedBytes rejects an ordinary MEMBER who is neither owner nor uploader", async () => {
     const s = seed();
     const uploaded = await service.uploadDocument({
       kind: "RECEIPT",
@@ -362,10 +370,34 @@ describe("authorization", () => {
     expect(uploaded.ok).toBe(true);
     if (!uploaded.ok) return;
 
-    const r = await service.getAuthorizedBytes(uploaded.value.record.id, s.otherId);
+    const r = await service.getAuthorizedBytes(uploaded.value.record.id, s.memberId);
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("DOCUMENT_FORBIDDEN");
+  });
+
+  it("getAuthorizedBytes allows a persisted OWNER to read another member's document bytes", async () => {
+    const s = seed();
+    const uploaded = await service.uploadDocument({
+      kind: "RECEIPT",
+      ownerMemberId: s.ownerId,
+      uploaderMemberId: s.uploaderId,
+      contentType: "application/pdf",
+      bytes: makeBytes("owner-cross-bytes"),
+    });
+    expect(uploaded.ok).toBe(true);
+    if (!uploaded.ok) return;
+    // Sanity: the cross-member OWNER is neither the owner nor the uploader
+    // of this specific document.
+    expect(s.otherId).not.toBe(uploaded.value.record.ownerMemberId);
+    expect(s.otherId).not.toBe(uploaded.value.record.uploaderMemberId);
+
+    const r = await service.getAuthorizedBytes(uploaded.value.record.id, s.otherId);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.record.id).toBe(uploaded.value.record.id);
+    expect(r.value.byteSize).toBeGreaterThan(0);
+    expect(r.value.contentType).toBe("application/pdf");
   });
 
   it("getAuthorizedBytes allows the owner", async () => {
@@ -404,7 +436,7 @@ describe("authorization", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("getDocument rejects a non-owner/non-uploader member", async () => {
+  it("getDocument rejects an ordinary MEMBER who is neither owner nor uploader", async () => {
     const s = seed();
     const uploaded = await service.uploadDocument({
       kind: "RECEIPT",
@@ -416,10 +448,29 @@ describe("authorization", () => {
     expect(uploaded.ok).toBe(true);
     if (!uploaded.ok) return;
 
-    const r = await service.getDocument(uploaded.value.record.id, s.otherId);
+    const r = await service.getDocument(uploaded.value.record.id, s.memberId);
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("DOCUMENT_FORBIDDEN");
+  });
+
+  it("getDocument allows a persisted OWNER to read another member's document metadata", async () => {
+    const s = seed();
+    const uploaded = await service.uploadDocument({
+      kind: "RECEIPT",
+      ownerMemberId: s.ownerId,
+      uploaderMemberId: s.uploaderId,
+      contentType: "application/pdf",
+      bytes: makeBytes("owner-cross-meta"),
+    });
+    expect(uploaded.ok).toBe(true);
+    if (!uploaded.ok) return;
+
+    const r = await service.getDocument(uploaded.value.record.id, s.otherId);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).not.toBeNull();
+    expect(r.value?.id).toBe(uploaded.value.record.id);
   });
 
   it("listByOwner rejects a requester who is not the owner", async () => {

@@ -21,7 +21,13 @@
 
 import type { D1Database } from "../../adapters/d1/types.js";
 import type { DocumentRepository, EnsureBySha256Result } from "./repository.js";
-import type { DocumentKind, DocumentRecord, InsertDocumentInput, MemberContext } from "./types.js";
+import type {
+  DocumentKind,
+  DocumentRecord,
+  InsertDocumentInput,
+  MemberContext,
+  MemberRole,
+} from "./types.js";
 
 // ── Row type as stored in SQLite ────────────────────────────────────────────
 
@@ -131,10 +137,10 @@ export class D1DocumentRepository implements DocumentRepository {
 
   async loadMemberContext(memberId: number): Promise<MemberContext | null> {
     const row = await this.db
-      .prepare("SELECT id, active FROM household_members WHERE id = ?")
+      .prepare("SELECT id, role, active FROM household_members WHERE id = ?")
       .bind(memberId)
-      .first<{ id: number; active: number }>();
+      .first<{ id: number; role: string; active: number }>();
     if (row === null) return null;
-    return { memberId: row.id, active: row.active };
+    return { memberId: row.id, role: row.role as MemberRole, active: row.active };
   }
 }
