@@ -124,11 +124,12 @@ export class DocumentApplicationService {
       return ok({ record: pre, created: false });
     }
 
-    // Generate the opaque storage key BEFORE calling put. The key is
-    // deterministic from sha256Hex + epoch-ms so a retry that hits this
-    // path before the row is inserted would put bytes under the same
-    // key (last-write-wins on identical bytes; the SHA is the
-    // invariant, not the key).
+    // Generate the opaque storage key BEFORE calling put. Every write
+    // attempt must receive its own opaque key: two concurrent uploads of
+    // the same bytes can land in the same millisecond, and a collision
+    // would cause the loser-duplicate cleanup delete to remove the
+    // winner's canonical object. The SHA is the content invariant; the
+    // key is per-attempt.
     const objectKey = buildObjectKey(sha256Hex);
 
     // Storage write FIRST. On throw we have not touched the metadata
@@ -401,17 +402,22 @@ function bufferToHex(buf: Uint8Array): string {
 }
 
 /**
- * Derive an opaque storage object_key from the content hash + epoch
- * milliseconds. The hash makes the key deterministic for a given payload;
- * the timestamp disambiguates re-uploads of the same bytes after a prior
- * row was removed (the M3A schema has no DELETE path, so the only path
- * that hits this code is a brand-new upload that has never been stored).
+ * Derive an opaque storage object_key for a single write attempt.
  *
- * Format: `m3a/{sha256HexPrefix}/{epochMs}-{sha256Hex}` — no user-supplied
- * bytes, no original filename, never includes PII.
+ *   - The 8-hex SHA-256 prefix shards the namespace by content so a
+ *     given payload is colocated; it never includes filenames or PII.
+ *   - The epoch-ms segment keeps keys sortable by upload time.
+ *   - The per-write 12-hex nonce guarantees that two uploads of the
+ *     same bytes in the same millisecond cannot collide, so the
+ *     loser-duplicate cleanup path deletes ONLY the orphan object it
+ *     just wrote and never the winner's canonical object.
+ *
+ * The M3A schema has no DELETE path; this builder fires only on a
+ * brand-new upload that has never been stored.
  */
 function buildObjectKey(sha256Hex: string): string {
   const epochMs = Date.now();
   const prefix = sha256Hex.slice(0, 8);
-  return `m3a/${prefix}/${epochMs}-${sha256Hex}`;
+  const nonce = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  return `m3a/${prefix}/${epochMs}-${nonce}-${sha256Hex}`;
 }

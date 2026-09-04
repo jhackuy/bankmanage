@@ -309,6 +309,152 @@ describe("uploadDocument — exact duplicate (concurrent)", () => {
   });
 });
 
+/**
+ * Deterministic same-timestamp duplicate test.
+ *
+ * Forces both concurrent uploads to derive the same epoch-ms inside
+ * buildObjectKey, then releases the two storage writes through a
+ * barrier so they enter the fake storage in the same window. Proves
+ * the per-attempt nonce in buildObjectKey prevents the loser-cleanup
+ * path from deleting the winner's canonical object.
+ */
+class BarrierStorageAdapter implements DocumentStorageAdapter {
+  private readonly inner: FakeDocumentStorageAdapter;
+  readonly putKeys: string[] = [];
+  private pending: Array<() => void> = [];
+
+  constructor(inner: FakeDocumentStorageAdapter) {
+    this.inner = inner;
+  }
+
+  async put(
+    key: string,
+    data: ReadableStream | ArrayBuffer | Uint8Array,
+    options: { contentType: string; metadata?: Record<string, string> }
+  ): Promise<StoredDocument> {
+    this.putKeys.push(key);
+    // Both callers arrive, then `release()` resolves them simultaneously
+    // so the two inner.put() calls fire in the same Date.now() window.
+    await new Promise<void>((resolve) => {
+      this.pending.push(resolve);
+    });
+    return this.inner.put(key, data, options);
+  }
+
+  async get(key: string): Promise<{ body: ReadableStream | null; metadata: StoredDocument } | null> {
+    return this.inner.get(key);
+  }
+
+  async delete(key: string): Promise<void> {
+    return this.inner.delete(key);
+  }
+
+  async exists(key: string): Promise<boolean> {
+    return this.inner.exists(key);
+  }
+
+  get size(): number {
+    return this.inner.size;
+  }
+
+  release(): void {
+    const p = this.pending;
+    this.pending = [];
+    for (const r of p) r();
+  }
+}
+
+describe("uploadDocument — exact duplicate (synchronized same-timestamp)", () => {
+  it("forces identical epoch-ms across two concurrent uploads, asserts distinct keys, one retained object, and authorized byte retrieval after loser cleanup", async () => {
+    const s = seed();
+    const bytes = makeBytes("dup-barr");
+
+    const realNow = Date.now;
+    const fixedNow = 1_700_000_000_000;
+    Date.now = () => fixedNow;
+
+    const barrier = new BarrierStorageAdapter(storage);
+    const barrierService = new DocumentApplicationService(repo, barrier);
+
+    try {
+      const uploadOne = barrierService.uploadDocument({
+        kind: "RECEIPT",
+        ownerMemberId: s.ownerId,
+        uploaderMemberId: s.uploaderId,
+        contentType: "image/png",
+        bytes,
+      });
+      const uploadTwo = barrierService.uploadDocument({
+        kind: "RECEIPT",
+        ownerMemberId: s.ownerId,
+        uploaderMemberId: s.uploaderId,
+        contentType: "image/png",
+        bytes,
+      });
+
+      // Spin until both put() calls have entered the barrier; then release.
+      while (barrier.putKeys.length < 2) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      barrier.release();
+
+      const [r1, r2] = await Promise.all([uploadOne, uploadTwo]);
+      expect(r1.ok).toBe(true);
+      expect(r2.ok).toBe(true);
+      if (!r1.ok || !r2.ok) return;
+
+      // Both attempts wrote under distinct opaque keys — the nonce in
+      // buildObjectKey prevents same-timestamp same-SHA collisions.
+      expect(barrier.putKeys).toHaveLength(2);
+      expect(new Set(barrier.putKeys).size).toBe(2);
+      // Both keys must keep the m3a/{prefix}/... privacy-safe structure.
+      for (const k of barrier.putKeys) {
+        expect(k).toMatch(/^m3a\/[0-9a-f]{8}\/[0-9]+-[0-9a-f]{12}-[0-9a-f]{64}$/);
+      }
+
+      // Exactly one row, exactly one reports created=true, both share id.
+      const createdFlags = [r1.value.created, r2.value.created].sort();
+      expect(createdFlags).toEqual([false, true]);
+      expect(r1.value.record.id).toBe(r2.value.record.id);
+      expect(r1.value.record.sha256Hex).toBe(r2.value.record.sha256Hex);
+      expect(await countDocs()).toBe(1);
+
+      // Exactly one retained storage object — loser-cleanup deleted its
+      // own orphan and left the winner's bytes untouched.
+      expect(storage.size).toBe(1);
+
+      // Authorized private-byte retrieval after the loser-cleanup path
+      // must still return the original payload through the surviving
+      // object — this would fail if the loser had deleted the winner.
+      const record = r1.value.created ? r1.value.record : r2.value.record;
+      const got = await barrierService.getAuthorizedBytes(record.id, s.ownerId);
+      expect(got.ok).toBe(true);
+      if (!got.ok) return;
+      expect(got.value.byteSize).toBe(bytes.byteLength);
+      expect(got.value.contentType).toBe("image/png");
+
+      // Drain the stream and verify byte-equality with the original input.
+      const reader = got.value.body.getReader();
+      const chunks: Uint8Array[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      const total = chunks.reduce((acc, c) => acc + c.length, 0);
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      expect(out).toEqual(bytes);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
 // ── Authorization ───────────────────────────────────────────────────────────
 
 describe("authorization", () => {
