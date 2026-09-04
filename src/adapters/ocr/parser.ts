@@ -37,7 +37,7 @@ const CURRENCY_SYMBOL_TO_CODE: Record<string, CurrencyCode> = {
 const CURRENCY_TOKEN_GROUP = `(?:${CURRENCY_CODES.join("|")}|\\$|₱|€|£|¥)`;
 
 const RE_AMOUNT_LABELED = new RegExp(
-  `(?:GRAND\\s+TOTAL|TOTAL\\s+DUE|BALANCE\\s+DUE|AMOUNT\\s+DUE|TOTAL)\\s*[:=]?\\s*${CURRENCY_TOKEN_GROUP}?\\s*${NUM}`,
+  `\\b(?:GRAND\\s+TOTAL|TOTAL\\s+DUE|BALANCE\\s+DUE|AMOUNT\\s+DUE|TOTAL)\\b\\s*[:=]?\\s*${CURRENCY_TOKEN_GROUP}?\\s*${NUM}`,
   "i"
 );
 
