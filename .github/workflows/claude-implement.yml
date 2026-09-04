@@ -156,34 +156,152 @@ jobs:
           fi
 
       - name: Final deterministic validation
+        id: validation_final
         if: steps.validation1.outcome == 'failure'
-        run: ./scripts/agent-validate.sh
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-final.log
 
-      - name: Require implementation diff
+      - name: Build minimal micro-repair context
+        id: micro_context
+        if: steps.validation_final.outcome == 'failure'
         run: |
           set -euo pipefail
-          rm -rf .agent-task
-          if [[ -z "$(git status --porcelain)" ]]; then
+          git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**' \
+            > .agent-task/changed-files.txt || true
+          awk '{print $NF}' .agent-task/changed-files.txt \
+            | sort -u > .agent-task/changed-paths.txt || true
+          {
+            echo "# Micro-repair context"
+            echo
+            echo "## Changed paths in this task (tracked + untracked, .agent-task excluded)"
+            cat .agent-task/changed-paths.txt
+            echo
+            echo "## Final validation log"
+            cat .agent-task/validation-final.log
+          } > .agent-task/micro-repair-context.md
+
+      - name: Classify remaining failures as narrow or broad
+        id: classify
+        if: steps.validation_final.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          set +e
+          node scripts/harness-narrow-failure.mjs .agent-task/validation-final.log \
+            .agent-task/changed-paths.txt \
+            > .agent-task/narrow.json
+          CLASSIFY_STATUS=$?
+          set -e
+          REASON=$(jq -r '.reason // "unknown"' .agent-task/narrow.json)
+          NARROW="false"
+          if [[ "$CLASSIFY_STATUS" == "0" ]]; then
+            NARROW="true"
+          fi
+          {
+            echo "### Narrow-failure classification"
+            echo "- narrow: ${NARROW}"
+            echo "- reason: ${REASON}"
+            echo "- files: $(jq -c '.files' .agent-task/narrow.json)"
+            echo "- error_count: $(jq -r '.error_count' .agent-task/narrow.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "narrow=${NARROW}" >> "$GITHUB_OUTPUT"
+          echo "narrow_reason=${REASON}" >> "$GITHUB_OUTPUT"
+
+      - name: One micro-repair pass (narrow failures only)
+        id: micro_repair
+        if: steps.classify.outputs.narrow == 'true' && steps.validation_final.outcome == 'failure'
+        env:
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          API_TIMEOUT_MS: "3000000"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"
+          ANTHROPIC_CUSTOM_MODEL_OPTION: MiniMax-M3[1m]
+          ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: MiniMax M3
+          ANTHROPIC_DEFAULT_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3[1m]
+        run: |
+          set -euo pipefail
+          set +e
+          claude -p --model "claude-sonnet-4-6" --permission-mode acceptEdits \
+            --tools "Read,Glob,Grep,Edit,Write" --disallowedTools "mcp__*" \
+            --strict-mcp-config --disable-slash-commands --setting-sources project \
+            --exclude-dynamic-system-prompt-sections --autocompact 60k --max-turns 16 \
+            --no-session-persistence --output-format json \
+            "Repair ONLY the deterministic failures in .agent-task/micro-repair-context.md. That context lists ONLY the changed files for this task plus the final validation log. Read those files plus any source/test files directly referenced in the log, fix the root cause, and stop. Do NOT reread .agent-task/issue.md, SPEC.md, or ADRs unless a changed file explicitly references one. Do NOT broaden scope, run commands, or deploy. If the listed failures cannot be fixed deterministically, leave the branch as-is and make no speculative edits." \
+            > .agent-task/claude-micro-repair.json 2> .agent-task/claude-micro-repair.stderr
+          CLAUDE_STATUS=$?
+          set -e
+          if (( CLAUDE_STATUS != 0 )); then
+            echo "Claude micro-repair returned non-zero; sanitized result:" >&2
+            jq '{is_error,subtype,result,errors}' .agent-task/claude-micro-repair.json >&2 || true
+            SUBTYPE=$(jq -r '.subtype // empty' .agent-task/claude-micro-repair.json 2>/dev/null || true)
+            REPO_CHANGES=$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**' || true)
+            if [[ "$SUBTYPE" == "error_max_turns" && -n "$REPO_CHANGES" ]]; then
+              echo "Claude micro-repair reached its turn bound with repository changes; continuing to validation." >> "$GITHUB_STEP_SUMMARY"
+            else
+              exit "$CLAUDE_STATUS"
+            fi
+          fi
+
+      - name: Deterministic validation after micro-repair
+        id: validation_post_micro
+        if: steps.classify.outputs.narrow == 'true' && steps.validation_final.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/agent-validate.sh 2>&1 | tee .agent-task/validation-post-micro.log
+
+      - name: Require implementation diff
+        id: require_diff
+        run: |
+          set -euo pipefail
+          REPO_CHANGES=$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**' || true)
+          if [[ -z "$REPO_CHANGES" ]]; then
             echo "No repository changes; no PR created." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push validated change
+      - name: Determine final implementation outcome
+        id: outcome
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.validation1.outcome }}" == "success" || \
+                "${{ steps.validation_final.outcome }}" == "success" || \
+                "${{ steps.validation_post_micro.outcome }}" == "success" ]]; then
+            echo "status=validated" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=preserved_with_failures" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push change
+        if: steps.require_diff.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.task.outputs.branch }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OUTCOME: ${{ steps.outcome.outputs.status }}
         run: |
           set -euo pipefail
           git config user.name "bankmanage-claude-agent"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "feat(issue-${ISSUE_NUMBER}): Claude implementation"
+          git add -A -- . ':(exclude).agent-task/**'
+          if [[ "$OUTCOME" == "validated" ]]; then
+            git commit -m "feat(issue-${ISSUE_NUMBER}): Claude implementation"
+          else
+            git commit -m "feat(issue-${ISSUE_NUMBER}): Claude implementation (preserved with failing validation)"
+          fi
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --set-upstream origin "$BRANCH"
           git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
-      - name: Open PR and report
+      - name: Open PR on validated run
+        if: steps.require_diff.outputs.has_changes == 'true' && steps.outcome.outputs.status == 'validated'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.task.outputs.branch }}
@@ -191,6 +309,7 @@ jobs:
           ISSUE_TITLE: ${{ steps.task.outputs.issue_title }}
         run: |
           set -euo pipefail
+          rm -rf .agent-task
           cat > /tmp/pr-body.md <<EOF
           Closes #${ISSUE_NUMBER}
 
@@ -198,7 +317,7 @@ jobs:
           - Claude Code 2.1.237 (pinned)
           - MiniMax M3[1m] through the officially supported Anthropic-compatible endpoint
           - Fresh bounded context; auto memory off; no subagents/MCP/Web/Bash
-          - At most one bounded repair pass
+          - At most one bounded repair pass, plus at most one micro-repair pass for narrow residual failures
 
           ## Deterministic validation
           npm ci, format/check, lint, typecheck, tests, fresh migration check and build all passed before push. GitHub CI remains the independent merge gate.
@@ -210,3 +329,48 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --body "Claude Code + MiniMax completed deterministic validation and opened ${PR_URL}."
           echo "Created: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve branch with failure evidence (no PR)
+        if: steps.require_diff.outputs.has_changes == 'true' && steps.outcome.outputs.status == 'preserved_with_failures'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.task.outputs.branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          NARROW_REASON: ${{ steps.classify.outputs.narrow_reason }}
+        run: |
+          set -euo pipefail
+          FINAL_TAIL=$(tail -n 80 .agent-task/validation-final.log 2>/dev/null || true)
+          POST_TAIL=$(tail -n 80 .agent-task/validation-post-micro.log 2>/dev/null || true)
+          NARROW_FILES=$(jq -c '.files // []' .agent-task/narrow.json 2>/dev/null || echo '[]')
+          CHANGED_PATHS=$(cat .agent-task/changed-paths.txt 2>/dev/null || true)
+          printf '%s\n' \
+            "[BANKMANAGE-CLAUDE-IMPL] Implementation branch \`${BRANCH}\` was pushed with substantial validated progress, but the final deterministic validation still failed after the bounded repair pass (and, when applicable, the narrow-failure micro-repair pass). The harness intentionally stopped after one micro-repair: it never loops on broad failures." \
+            "" \
+            "- narrow classification: \`${NARROW_REASON}\`" \
+            "- failing files detected: ${NARROW_FILES}" \
+            "- preserved task paths:" \
+            "${CHANGED_PATHS}" \
+            "" \
+            "Tail of final validation log:" \
+            '```' \
+            "${FINAL_TAIL}" \
+            '```' \
+            "" \
+            "Tail of post-micro-repair validation log (if any):" \
+            '```' \
+            "${POST_TAIL}" \
+            '```' \
+            "" \
+            "No PR was opened. The branch is recoverable for a maintainer to push the missing fix; rerun \`./scripts/agent-validate.sh\` locally after pulling \`${BRANCH}\`. No additional automated Agent retry will be attempted for this run." \
+            > /tmp/preservation-comment.md
+          rm -rf .agent-task
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body-file /tmp/preservation-comment.md
+          {
+            echo "### Harness preservation"
+            echo "- branch: ${BRANCH}"
+            echo "- narrow_reason: ${NARROW_REASON}"
+            echo "- failing_files: ${NARROW_FILES}"
+            echo "- status: preserved_with_failures (no PR opened)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
