@@ -140,6 +140,18 @@ describe("isCriticalFieldLowConfidence", () => {
       isCriticalFieldLowConfidence({ value: "100", confidence: DEFAULT_CRITICAL_CONFIDENCE_THRESHOLD })
     ).toBe(false);
   });
+
+  it("returns true when confidence is NaN", () => {
+    expect(isCriticalFieldLowConfidence({ value: "100", confidence: Number.NaN })).toBe(true);
+  });
+
+  it("returns true when confidence is +Infinity", () => {
+    expect(isCriticalFieldLowConfidence({ value: "100", confidence: Number.POSITIVE_INFINITY })).toBe(true);
+  });
+
+  it("returns true when confidence is -Infinity", () => {
+    expect(isCriticalFieldLowConfidence({ value: "100", confidence: Number.NEGATIVE_INFINITY })).toBe(true);
+  });
 });
 
 describe("Auto-post guard (SPEC.md §12 + AGENTS.md §3)", () => {

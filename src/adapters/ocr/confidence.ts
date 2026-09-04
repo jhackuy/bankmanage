@@ -56,5 +56,6 @@ export function isCriticalFieldLowConfidence(
   threshold: number = DEFAULT_CRITICAL_CONFIDENCE_THRESHOLD
 ): boolean {
   if (field === undefined) return true;
+  if (!Number.isFinite(field.confidence)) return true;
   return field.confidence < threshold;
 }
