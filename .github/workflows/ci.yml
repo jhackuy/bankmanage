@@ -12,6 +12,7 @@ on:
   pull_request:
     branches: [main]
 
+# Issue #39: workflow-write permission probe on the dedicated infra branch only.
 # One useful CI run per PR/main update; superseded runs are cancelled.
 concurrency:
   group: ci-${{ github.event.pull_request.number || inputs.target_sha || github.ref }}
