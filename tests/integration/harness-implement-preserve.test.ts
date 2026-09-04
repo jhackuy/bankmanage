@@ -6,12 +6,14 @@
  * uses `git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**'`
  * to detect task changes (both tracked and untracked) before pushing.
  *
- * This integration test proves that the exact command shape used by the
+ * This integration test proves that the exact command shapes used by the
  * workflow:
  *   1. Reports a committed/tracked file modification.
  *   2. Reports a brand-new untracked implementation file.
  *   3. Reports a brand-new untracked test file.
  *   4. Excludes the `.agent-task/` scratch directory from the report.
+ *   5. Stage every task change while keeping `.agent-task/` out of the commit
+ *      and still readable on disk for the post-push preservation comment.
  *
  * If any of these contracts regress, the harness can lose recoverable
  * implementation work even when it survived the run.
@@ -63,6 +65,11 @@ function detectionOutput(cwd: string): string {
   );
 }
 
+function stageTaskChanges(cwd: string): void {
+  // The exact staging command shape used in the claude-implement.yml commit step.
+  git(cwd, ["add", "-A", "--", ".", ":(exclude).agent-task/**"]);
+}
+
 describe("claude-implement.yml change detection preserves tracked and untracked files", () => {
   let repo: RepoFixture;
 
@@ -111,7 +118,7 @@ describe("claude-implement.yml change detection preserves tracked and untracked 
     expect(out).not.toContain(".agent-task");
   });
 
-  it("the `git add -A` discipline preserves both tracked modifications and untracked files in the committed tree", () => {
+  it("the staging discipline preserves both tracked modifications and untracked files in the committed tree", () => {
     writeFileSync(join(repo.root, "README.md"), "fixture-updated\n");
     mkdirSync(dirname(join(repo.root, "src", "new.ts")), { recursive: true });
     writeFileSync(join(repo.root, "src", "new.ts"), "export const newFn = (): number => 42;\n");
@@ -121,12 +128,32 @@ describe("claude-implement.yml change detection preserves tracked and untracked 
       "test('new', () => { expect(1).toBe(1); });\n"
     );
 
-    // Same `git add -A` + commit + diff --name-only pipeline used by the workflow.
-    git(repo.root, ["add", "-A"]);
+    stageTaskChanges(repo.root);
     git(repo.root, ["commit", "-q", "-m", "task: simulate implementation"]);
     const staged = git(repo.root, ["diff", "--name-only", "HEAD~1", "HEAD"]);
     const lines = staged.split("\n").filter(Boolean).sort();
     expect(lines).toEqual(["README.md", "src/new.ts", "tests/unit/new.test.ts"].sort());
+  });
+
+  it("keeps .agent-task scratch files out of the committed tree but on disk for the preservation comment", () => {
+    mkdirSync(join(repo.root, ".agent-task"), { recursive: true });
+    writeFileSync(join(repo.root, ".agent-task", "issue.json"), '{"number":1}\n');
+    writeFileSync(join(repo.root, ".agent-task", "validation-final.log"), "FAIL\n");
+    writeFileSync(join(repo.root, ".agent-task", "changed-paths.txt"), "src/new.ts\n");
+    mkdirSync(dirname(join(repo.root, "src", "new.ts")), { recursive: true });
+    writeFileSync(join(repo.root, "src", "new.ts"), "export const newFn = (): number => 42;\n");
+
+    stageTaskChanges(repo.root);
+    git(repo.root, ["commit", "-q", "-m", "task: simulate implementation"]);
+
+    const treeOutput = git(repo.root, ["ls-tree", "-r", "--name-only", "HEAD"]);
+    const tracked = treeOutput.split("\n").filter(Boolean);
+    expect(tracked).toContain("src/new.ts");
+    expect(tracked.filter((path) => path.startsWith(".agent-task/"))).toEqual([]);
+
+    // The harness still reads these logs after the push to build its issue comment.
+    expect(existsSync(join(repo.root, ".agent-task", "validation-final.log"))).toBe(true);
+    expect(existsSync(join(repo.root, ".agent-task", "changed-paths.txt"))).toBe(true);
   });
 
   it("the spawned command exits non-zero only on real git errors, not on dirty status", () => {

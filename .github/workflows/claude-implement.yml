@@ -189,6 +189,7 @@ jobs:
           set -euo pipefail
           set +e
           node scripts/harness-narrow-failure.mjs .agent-task/validation-final.log \
+            .agent-task/changed-paths.txt \
             > .agent-task/narrow.json
           CLASSIFY_STATUS=$?
           set -e
@@ -289,7 +290,7 @@ jobs:
           set -euo pipefail
           git config user.name "bankmanage-claude-agent"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A -- . ':(exclude).agent-task/**'
           if [[ "$OUTCOME" == "validated" ]]; then
             git commit -m "feat(issue-${ISSUE_NUMBER}): Claude implementation"
           else

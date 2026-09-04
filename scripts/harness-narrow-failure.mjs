@@ -7,6 +7,7 @@
  *
  * "Narrow" means:
  *   - The log contains at least one recognisable deterministic failure.
+ *   - Every failing file belongs to the task's changed paths, when that list is supplied.
  *   - The failures mention at most MAX_FILES distinct task files.
  *   - The total number of recognisable failure markers is at most MAX_ERROR_LINES.
  *
@@ -19,7 +20,7 @@
  *   - Vite build failures:       `Failed to compile` followed by file path
  *
  * Usage:
- *   node scripts/harness-narrow-failure.mjs <validation-log-path>
+ *   node scripts/harness-narrow-failure.mjs <validation-log-path> [changed-paths-file]
  *
  * Output:
  *   JSON to stdout: { narrow, reason, files: [...], error_count }
@@ -54,7 +55,27 @@ const PATTERNS = [
   { name: "vite_build", regex: /Failed to compile[^\n]*\n[^\n]*?([^\s()]+\.(?:ts|tsx|js|jsx|mjs|cjs))/g },
 ];
 
-export function analyzeFailureNarrowness(log) {
+function normalizePath(candidate) {
+  return candidate.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function parseChangedPaths(text) {
+  return text
+    .split("\n")
+    .map((line) => normalizePath(line.trim()))
+    .filter(Boolean);
+}
+
+// Logs mix repo-relative paths (tsc, vitest) with absolute ones (eslint), so a
+// changed path also matches when it is a suffix of the detected path.
+function belongsToChangedPaths(file, changedPaths) {
+  const normalized = normalizePath(file);
+  return changedPaths.some(
+    (changedPath) => normalized === changedPath || normalized.endsWith(`/${changedPath}`)
+  );
+}
+
+export function analyzeFailureNarrowness(log, changedPaths) {
   const foundFiles = new Set();
   const errors = [];
 
@@ -70,11 +91,15 @@ export function analyzeFailureNarrowness(log) {
   }
 
   const files = [...foundFiles].sort();
+  const unrelated = changedPaths ? files.filter((f) => !belongsToChangedPaths(f, changedPaths)) : [];
+
   let narrow = false;
   let reason;
 
   if (foundFiles.size === 0) {
     reason = "no_deterministic_failures_recognized";
+  } else if (unrelated.length > 0) {
+    reason = `unrelated_files_${unrelated.length}`;
   } else if (foundFiles.size > MAX_FILES) {
     reason = `too_many_files_${foundFiles.size}`;
   } else if (errors.length > MAX_ERROR_LINES) {
@@ -98,12 +123,16 @@ function isMainModule() {
 
 if (isMainModule()) {
   const logPath = process.argv[2];
+  const changedPathsPath = process.argv[3];
   if (!logPath) {
-    process.stderr.write("Usage: harness-narrow-failure.mjs <validation-log-path>\n");
+    process.stderr.write("Usage: harness-narrow-failure.mjs <validation-log-path> [changed-paths-file]\n");
     process.exit(2);
   }
   const log = readFileSync(logPath, "utf8");
-  const result = analyzeFailureNarrowness(log);
+  const changedPaths = changedPathsPath
+    ? parseChangedPaths(readFileSync(changedPathsPath, "utf8"))
+    : undefined;
+  const result = analyzeFailureNarrowness(log, changedPaths);
   process.stdout.write(JSON.stringify(result) + "\n");
   process.exit(result.narrow ? 0 : 1);
 }

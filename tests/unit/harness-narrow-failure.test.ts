@@ -25,13 +25,19 @@ interface NarrowResult {
   error_count: number;
 }
 
-function runDetector(log: string): { exit: number; result: NarrowResult } {
+function runDetector(log: string, changedPaths?: string[]): { exit: number; result: NarrowResult } {
   const dir = mkdtempSync(join(tmpdir(), "harness-narrow-"));
   try {
     const logPath = join(dir, "validation.log");
     writeFileSync(logPath, log, "utf8");
+    const args = [SCRIPT, logPath];
+    if (changedPaths) {
+      const changedPathsPath = join(dir, "changed-paths.txt");
+      writeFileSync(changedPathsPath, changedPaths.join("\n") + "\n", "utf8");
+      args.push(changedPathsPath);
+    }
     try {
-      const stdout = execFileSync("node", [SCRIPT, logPath], {
+      const stdout = execFileSync("node", args, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -212,5 +218,54 @@ describe("harness narrow-failure detector", () => {
     const broadLog = "Everything passed.\n";
     expect(runDetector(narrowLog).exit).toBe(0);
     expect(runDetectorExpectingFailure(broadLog).exit).toBe(1);
+  });
+});
+
+describe("harness narrow-failure detector scoped to the task's changed paths", () => {
+  it("accepts a failure in a file the task actually changed", () => {
+    const log = "src/services/foo.ts(10,5): error TS2322: bad\n";
+    const { exit, result } = runDetector(log, ["src/services/foo.ts", "tests/unit/foo.test.ts"]);
+    expect(exit).toBe(0);
+    expect(result.narrow).toBe(true);
+    expect(result.reason).toBe("narrow");
+  });
+
+  it("rejects a failure in a file outside the task's changed paths", () => {
+    const log = "src/services/unrelated.ts(10,5): error TS2322: bad\n";
+    const { exit, result } = runDetector(log, ["src/services/foo.ts"]);
+    expect(exit).toBe(1);
+    expect(result.narrow).toBe(false);
+    expect(result.reason).toBe("unrelated_files_1");
+    expect(result.files).toEqual(["src/services/unrelated.ts"]);
+  });
+
+  it("rejects the whole set when only some failing files are in scope", () => {
+    const log = [
+      "src/services/foo.ts(10,5): error TS2322: bad",
+      "src/services/unrelated.ts(12,1): error TS2345: bad",
+    ].join("\n");
+    const { exit, result } = runDetector(log, ["src/services/foo.ts"]);
+    expect(exit).toBe(1);
+    expect(result.narrow).toBe(false);
+    expect(result.reason).toBe("unrelated_files_1");
+  });
+
+  it("matches absolute log paths against repo-relative changed paths", () => {
+    const log = [
+      "/home/runner/work/repo/src/services/foo.ts",
+      "  42:7  error  Unexpected any  @typescript-eslint/no-explicit-any",
+      "",
+    ].join("\n");
+    const { exit, result } = runDetector(log, ["src/services/foo.ts"]);
+    expect(exit).toBe(0);
+    expect(result.narrow).toBe(true);
+  });
+
+  it("rejects every failure when the task changed no paths", () => {
+    const log = "src/services/foo.ts(10,5): error TS2322: bad\n";
+    const { exit, result } = runDetector(log, []);
+    expect(exit).toBe(1);
+    expect(result.narrow).toBe(false);
+    expect(result.reason).toBe("unrelated_files_1");
   });
 });
