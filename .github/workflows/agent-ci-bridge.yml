@@ -10,9 +10,11 @@ on:
         description: Successful Claude Issue Implementer run ID to bridge into CI
         required: true
         type: string
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: agent-ci-bridge-${{ github.event.workflow_run.id || inputs.source_run_id }}
+  group: agent-ci-bridge-${{ github.event.workflow_run.id || inputs.source_run_id || github.event.comment.id }}
   cancel-in-progress: false
 
 permissions:
@@ -24,7 +26,10 @@ jobs:
   dispatch:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.comment.user.login == github.repository_owner &&
+       startsWith(github.event.comment.body, '/ci-bridge '))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
 
@@ -33,9 +38,33 @@ jobs:
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.source_run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          DISPATCH_RUN_ID: ${{ inputs.source_run_id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           set -euo pipefail
+
+          case "$EVENT_NAME" in
+            workflow_run)
+              SOURCE_RUN_ID="$WORKFLOW_RUN_ID"
+              ;;
+            workflow_dispatch)
+              SOURCE_RUN_ID="$DISPATCH_RUN_ID"
+              ;;
+            issue_comment)
+              SOURCE_RUN_ID=$(awk '{print $2}' <<<"$COMMENT_BODY")
+              ;;
+            *)
+              echo "Unsupported trigger: ${EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || {
+            echo "Invalid Builder run ID: ${SOURCE_RUN_ID:-empty}" >&2
+            exit 1
+          }
 
           RUN_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")
           RUN_NAME=$(jq -r '.name' <<<"$RUN_JSON")
@@ -95,6 +124,7 @@ jobs:
             exit 1
           }
 
+          echo "source_run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "branch=$HEAD_REF" >> "$GITHUB_OUTPUT"
           echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
@@ -103,6 +133,7 @@ jobs:
       - name: Dispatch exact independent CI
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ steps.target.outputs.source_run_id }}
           HEAD_REF: ${{ steps.target.outputs.branch }}
           HEAD_SHA: ${{ steps.target.outputs.sha }}
           PR_NUMBER: ${{ steps.target.outputs.pr_number }}
@@ -112,6 +143,7 @@ jobs:
           gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF" -f target_sha="$HEAD_SHA"
           {
             echo "### Agent CI bridge"
+            echo "- source_builder_run: ${SOURCE_RUN_ID}"
             echo "- PR: #${PR_NUMBER} ${PR_URL}"
             echo "- head_ref: ${HEAD_REF}"
             echo "- exact_sha: ${HEAD_SHA}"
