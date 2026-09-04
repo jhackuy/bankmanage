@@ -5,13 +5,42 @@
  * benchmark harness. All amounts, dates, merchant names, card numbers and
  * identifiers are obviously synthetic — no real family data.
  *
+ * Each fixture carries:
+ *  - `text`: UTF-8 ground-truth OCR text (used by the deterministic parser
+ *    and by the mock provider to simulate OCR output from image bytes)
+ *  - `imageBytes`: synthetic image bytes that a mock OCR provider decodes
+ *    back into `text`. The production provider path receives these bytes;
+ *    the mock provider boundary in `provider.ts` decodes them.
+ *
  * Categories cover SPEC.md §12 failure modes:
  *   clean, blur, glare, crop, rotation, multilingual
  */
 
 import type { OcrBenchmarkFixture } from "./benchmark.js";
 
-export const OCR_BENCHMARK_FIXTURES: readonly OcrBenchmarkFixture[] = [
+export function synthesizeImageBytes(text: string): ArrayBuffer {
+  const enc = new TextEncoder().encode(text);
+  const buf = new ArrayBuffer(enc.byteLength);
+  new Uint8Array(buf).set(enc);
+  return buf;
+}
+
+interface RawFixture {
+  readonly id: string;
+  readonly category: "clean" | "blur" | "glare" | "crop" | "rotation" | "multilingual";
+  readonly text: string;
+  readonly groundTruth: {
+    readonly amount?: string;
+    readonly date?: string;
+    readonly currency?: string;
+    readonly merchant?: string;
+    readonly paymentMethod?: string;
+    readonly taxAmount?: string;
+    readonly last4?: string;
+  };
+}
+
+const RAW_FIXTURES: readonly RawFixture[] = [
   // ---- clean (8 fixtures) ----
   {
     id: "receipt-clean-001-grocery-php",
@@ -543,5 +572,15 @@ export const OCR_BENCHMARK_FIXTURES: readonly OcrBenchmarkFixture[] = [
     },
   },
 ];
+
+export const OCR_BENCHMARK_FIXTURES: readonly OcrBenchmarkFixture[] = RAW_FIXTURES.map(
+  (f): OcrBenchmarkFixture => ({
+    id: f.id,
+    category: f.category,
+    text: f.text,
+    imageBytes: synthesizeImageBytes(f.text),
+    groundTruth: f.groundTruth,
+  })
+);
 
 export const OCR_BENCHMARK_MIN_FIXTURES = 20;

@@ -28,14 +28,18 @@ export function decideOcrReview(
   const amountConfidence = result.totalAmountCandidate?.confidence ?? null;
   if (result.totalAmountCandidate === undefined) {
     reasons.push("missing total amount candidate");
-  } else if (amountConfidence !== null && amountConfidence < threshold) {
+  } else if (
+    amountConfidence === null ||
+    !Number.isFinite(amountConfidence) ||
+    amountConfidence < threshold
+  ) {
     reasons.push(`total amount confidence ${amountConfidence} below threshold ${threshold}`);
   }
 
   const dateConfidence = result.dateCandidate?.confidence ?? null;
   if (result.dateCandidate === undefined) {
     reasons.push("missing date candidate");
-  } else if (dateConfidence !== null && dateConfidence < threshold) {
+  } else if (dateConfidence === null || !Number.isFinite(dateConfidence) || dateConfidence < threshold) {
     reasons.push(`date confidence ${dateConfidence} below threshold ${threshold}`);
   }
 

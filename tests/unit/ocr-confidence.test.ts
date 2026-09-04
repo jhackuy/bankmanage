@@ -67,6 +67,59 @@ describe("decideOcrReview", () => {
     expect(decision.requiresReview).toBe(true);
     expect(decision.reasons.length).toBe(2);
   });
+
+  it("requires review when amount confidence is NaN", () => {
+    const result = parseOcrText("Date: 2026-08-15\nTOTAL 100.00");
+    const tampered = {
+      ...result,
+      totalAmountCandidate: { value: "100.00", confidence: Number.NaN },
+    };
+    const decision = decideOcrReview(tampered);
+    expect(decision.requiresReview).toBe(true);
+    expect(decision.reasons.some((r) => r.includes("total amount"))).toBe(true);
+  });
+
+  it("requires review when amount confidence is +Infinity", () => {
+    const result = parseOcrText("Date: 2026-08-15\nTOTAL 100.00");
+    const tampered = {
+      ...result,
+      totalAmountCandidate: { value: "100.00", confidence: Number.POSITIVE_INFINITY },
+    };
+    const decision = decideOcrReview(tampered);
+    expect(decision.requiresReview).toBe(true);
+    expect(decision.reasons.some((r) => r.includes("total amount"))).toBe(true);
+  });
+
+  it("requires review when amount confidence is -Infinity", () => {
+    const result = parseOcrText("Date: 2026-08-15\nTOTAL 100.00");
+    const tampered = {
+      ...result,
+      totalAmountCandidate: { value: "100.00", confidence: Number.NEGATIVE_INFINITY },
+    };
+    const decision = decideOcrReview(tampered);
+    expect(decision.requiresReview).toBe(true);
+  });
+
+  it("requires review when date confidence is NaN", () => {
+    const result = parseOcrText("Date: 2026-08-15\nTOTAL 100.00");
+    const tampered = {
+      ...result,
+      dateCandidate: { value: "2026-08-15", confidence: Number.NaN },
+    };
+    const decision = decideOcrReview(tampered);
+    expect(decision.requiresReview).toBe(true);
+    expect(decision.reasons.some((r) => r.includes("date"))).toBe(true);
+  });
+
+  it("requires review when date confidence is non-finite (Infinity)", () => {
+    const result = parseOcrText("Date: 2026-08-15\nTOTAL 100.00");
+    const tampered = {
+      ...result,
+      dateCandidate: { value: "2026-08-15", confidence: Number.POSITIVE_INFINITY },
+    };
+    const decision = decideOcrReview(tampered);
+    expect(decision.requiresReview).toBe(true);
+  });
 });
 
 describe("isCriticalFieldLowConfidence", () => {

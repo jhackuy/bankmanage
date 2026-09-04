@@ -2,18 +2,25 @@
  * Deterministic OCR benchmark harness.
  *
  * Runs an `OcrAdapter` over a synthetic fixture set and reports
- * correctness, latency and failure-mode metrics against SPEC.md §12
- * acceptance thresholds:
+ * correctness, latency, failure-mode metrics, and review-gate interception
+ * against SPEC.md §12 acceptance thresholds:
  *
  *   - amount correctness >= 95%
  *   - date correctness >= 90%
- *   - every incorrect critical result is intercepted by review (the
- *     adapter has no auto-post path; the gate lives in `confidence.ts`).
+ *   - every incorrect critical amount/date result is intercepted for
+ *     human review (the adapter has no auto-post path; the gate lives in
+ *     `confidence.ts` and is applied per fixture in this harness).
  *
  * The benchmark NEVER posts financial transactions. It only reports
  * metrics; the adapter is structurally read-only.
+ *
+ * Each fixture carries synthetic image bytes (`fixture.imageBytes`). The
+ * benchmark invokes `adapter.extract(imageBytes, "image/png")` so the
+ * production/provider path is exercised. Tests substitute a mock
+ * `OcrProvider` that decodes these bytes deterministically.
  */
 
+import { decideOcrReview } from "./confidence.js";
 import type { OcrAdapter, OcrExtractionResult } from "./interface.js";
 
 export const AMOUNT_CORRECTNESS_THRESHOLD = 0.95;
@@ -36,6 +43,8 @@ export interface OcrBenchmarkFixture {
   readonly category: OcrBenchmarkCategory;
   /** UTF-8 text content of the synthetic document. */
   readonly text: string;
+  /** Synthetic image bytes that mock providers decode back into `text`. */
+  readonly imageBytes: ArrayBuffer;
   readonly groundTruth: OcrBenchmarkGroundTruth;
 }
 
@@ -51,6 +60,15 @@ export interface OcrBenchmarkRow {
   readonly last4Correct: boolean | null;
   readonly amountConfidence: number | null;
   readonly dateConfidence: number | null;
+  readonly reviewRequiresHuman: boolean;
+  readonly reviewReasons: readonly string[];
+  /**
+   * True iff a critical amount or date was incorrect (or its confidence
+   * was missing/non-finite) yet the review gate did NOT require human
+   * review — a SPEC.md §12 violation that this benchmark is designed to
+   * surface.
+   */
+  readonly interceptionFailure: boolean;
   readonly processingMs: number;
   /** Provider cost estimate in USD micro-units (0 for the synthetic benchmark). */
   readonly costEstimateMicroUsd: number;
@@ -80,6 +98,8 @@ export interface OcrBenchmarkReport {
   readonly maxProcessingMs: number;
   readonly totalCostEstimateMicroUsd: number;
   readonly failureModeBreakdown: Readonly<Record<OcrBenchmarkCategory, OcrCategoryBreakdown>>;
+  /** Fixtures where an incorrect critical amount/date was NOT intercepted by review. */
+  readonly interceptedUnreviewedCriticalFields: readonly string[];
   readonly rows: readonly OcrBenchmarkRow[];
   readonly adapterDidPostFinancialTransaction: false;
 }
@@ -106,12 +126,21 @@ function compareDates(extracted: string | undefined, expected: string | undefine
 
 function evaluateFixture(fixture: OcrBenchmarkFixture, result: OcrExtractionResult): OcrBenchmarkRow {
   const gt = fixture.groundTruth;
+  const review = decideOcrReview(result);
+
+  const amountCorrect =
+    gt.amount !== undefined ? compareAmounts(result.totalAmountCandidate?.value, gt.amount) : null;
+  const dateCorrect = gt.date !== undefined ? compareDates(result.dateCandidate?.value, gt.date) : null;
+
+  const amountCriticalBad = amountCorrect === false;
+  const dateCriticalBad = dateCorrect === false;
+  const interceptionFailure = (amountCriticalBad || dateCriticalBad) && !review.requiresReview;
+
   return {
     fixtureId: fixture.id,
     category: fixture.category,
-    amountCorrect:
-      gt.amount !== undefined ? compareAmounts(result.totalAmountCandidate?.value, gt.amount) : null,
-    dateCorrect: gt.date !== undefined ? compareDates(result.dateCandidate?.value, gt.date) : null,
+    amountCorrect,
+    dateCorrect,
     currencyCorrect: gt.currency !== undefined ? result.currencyCandidate?.value === gt.currency : null,
     merchantCorrect: gt.merchant !== undefined ? result.merchantCandidate?.value === gt.merchant : null,
     paymentMethodCorrect:
@@ -121,6 +150,9 @@ function evaluateFixture(fixture: OcrBenchmarkFixture, result: OcrExtractionResu
     last4Correct: gt.last4 !== undefined ? result.last4Candidate?.value === gt.last4 : null,
     amountConfidence: result.totalAmountCandidate?.confidence ?? null,
     dateConfidence: result.dateCandidate?.confidence ?? null,
+    reviewRequiresHuman: review.requiresReview,
+    reviewReasons: review.reasons,
+    interceptionFailure,
     processingMs: result.processingMs,
     costEstimateMicroUsd: 0,
     error: null,
@@ -173,6 +205,10 @@ function buildReport(rows: readonly OcrBenchmarkRow[]): OcrBenchmarkReport {
     };
   }
 
+  const interceptedUnreviewedCriticalFields = rows
+    .filter((r) => r.interceptionFailure)
+    .map((r) => r.fixtureId);
+
   return {
     fixtureCount,
     amountCorrectness,
@@ -190,6 +226,7 @@ function buildReport(rows: readonly OcrBenchmarkRow[]): OcrBenchmarkReport {
     maxProcessingMs,
     totalCostEstimateMicroUsd,
     failureModeBreakdown: breakdown,
+    interceptedUnreviewedCriticalFields,
     rows,
     adapterDidPostFinancialTransaction: false,
   };
@@ -203,8 +240,7 @@ export async function runOcrBenchmark(
 
   for (const fixture of fixtures) {
     try {
-      const textBytes = new TextEncoder().encode(fixture.text);
-      const result = await adapter.extract(textBytes.buffer, "text/plain");
+      const result = await adapter.extract(fixture.imageBytes, "image/png");
       rows.push(evaluateFixture(fixture, result));
     } catch (err) {
       const gt = fixture.groundTruth;
@@ -222,6 +258,9 @@ export async function runOcrBenchmark(
         last4Correct: fieldIfGt("last4"),
         amountConfidence: null,
         dateConfidence: null,
+        reviewRequiresHuman: true,
+        reviewReasons: ["adapter threw: extraction failed"],
+        interceptionFailure: false,
         processingMs: 0,
         costEstimateMicroUsd: 0,
         error: err instanceof Error ? err.message : String(err),
@@ -230,8 +269,9 @@ export async function runOcrBenchmark(
   }
 
   const report = buildReport(rows);
+  const interceptionMet = report.interceptedUnreviewedCriticalFields.length === 0;
   return {
     report,
-    thresholdMet: report.amountThresholdMet && report.dateThresholdMet,
+    thresholdMet: report.amountThresholdMet && report.dateThresholdMet && interceptionMet,
   };
 }
