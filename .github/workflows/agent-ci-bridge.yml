@@ -1,0 +1,108 @@
+name: Agent CI Bridge
+
+on:
+  workflow_run:
+    workflows: ["Claude Issue Implementer"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful Claude Issue Implementer run ID to bridge into CI
+        required: true
+        type: string
+
+concurrency:
+  group: agent-ci-bridge-${{ github.event.workflow_run.id || inputs.source_run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Resolve validated Builder PR head
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+
+          RUN_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")
+          RUN_NAME=$(jq -r '.name' <<<"$RUN_JSON")
+          RUN_CONCLUSION=$(jq -r '.conclusion // empty' <<<"$RUN_JSON")
+
+          test "$RUN_NAME" = "Claude Issue Implementer" || {
+            echo "Refusing non-Builder source run: ${RUN_NAME}" >&2
+            exit 1
+          }
+          test "$RUN_CONCLUSION" = "success" || {
+            echo "Refusing Builder run without success conclusion: ${RUN_CONCLUSION:-none}" >&2
+            exit 1
+          }
+
+          mapfile -t MATCHING_BRANCHES < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/branches?per_page=100" \
+              --jq ".[] | select(.name | startswith(\"claude/issue-\")) | select(.name | endswith(\"-${SOURCE_RUN_ID}\")) | .name"
+          )
+
+          if (( ${#MATCHING_BRANCHES[@]} != 1 )); then
+            echo "Expected exactly one Builder branch for run ${SOURCE_RUN_ID}; found ${#MATCHING_BRANCHES[@]}." >&2
+            printf '%s\n' "${MATCHING_BRANCHES[@]:-}" >&2
+            exit 1
+          fi
+
+          BRANCH="${MATCHING_BRANCHES[0]}"
+          PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
+            --json number,headRefName,headRefOid,url)
+          PR_COUNT=$(jq 'length' <<<"$PR_JSON")
+          test "$PR_COUNT" = "1" || {
+            echo "Expected exactly one open PR for ${BRANCH}; found ${PR_COUNT}." >&2
+            exit 1
+          }
+
+          PR_NUMBER=$(jq -r '.[0].number' <<<"$PR_JSON")
+          HEAD_REF=$(jq -r '.[0].headRefName' <<<"$PR_JSON")
+          HEAD_SHA=$(jq -r '.[0].headRefOid' <<<"$PR_JSON")
+          PR_URL=$(jq -r '.[0].url' <<<"$PR_JSON")
+
+          test "$HEAD_REF" = "$BRANCH" || {
+            echo "Resolved PR head ref does not match Builder branch." >&2
+            exit 1
+          }
+          test -n "$HEAD_SHA" || {
+            echo "Resolved empty PR head SHA." >&2
+            exit 1
+          }
+
+          echo "branch=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch exact independent CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.target.outputs.branch }}
+          HEAD_SHA: ${{ steps.target.outputs.sha }}
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+          PR_URL: ${{ steps.target.outputs.pr_url }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF" -f target_sha="$HEAD_SHA"
+          {
+            echo "### Agent CI bridge"
+            echo "- PR: #${PR_NUMBER} ${PR_URL}"
+            echo "- head_ref: ${HEAD_REF}"
+            echo "- exact_sha: ${HEAD_SHA}"
+            echo "- dispatch: accepted"
+          } >> "$GITHUB_STEP_SUMMARY"
