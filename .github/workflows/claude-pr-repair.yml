@@ -268,7 +268,7 @@ jobs:
           set -euo pipefail
           rm -rf .agent-task
 
-          if git diff --quiet "$START_HEAD" --; then
+          if [ -z "$(git status --porcelain --untracked-files=all -- . ':(exclude).agent-task/**')" ]; then
             echo "No repository change required after current-head verification." >> "$GITHUB_STEP_SUMMARY"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
