@@ -29,21 +29,33 @@
  *      facts, surface REVIEW_GATE_FAILED BEFORE any financial write.
  *   3. Validate account ownership / active / currency.
  *   4. Validate category active.
- *   5. Post the transaction via TransactionApplicationService with
+ *   5. CLAIM the session's post_idempotency_key slot. The claim runs as
+ *      an atomic UPDATE keyed on (status='PENDING_REVIEW',
+ *      post_idempotency_key IS NULL OR = ?). Two concurrent callers
+ *      with different keys cannot both win — the second caller sees
+ *      ALREADY_CLAIMED_DIFFERENT_KEY and is rejected with
+ *      SESSION_CLAIM_CONFLICT BEFORE any transaction is posted. A
+ *      same-key retry sees ALREADY_CLAIMED_SAME_KEY and proceeds (the
+ *      transactions UNIQUE keeps the retry a no-op at the financial
+ *      layer).
+ *   6. Post the transaction via TransactionApplicationService with
  *      `sourceEvidenceRef = "doc:" + documentId` and the caller-supplied
- *      idempotencyKey.
- *   6. Confirm the session via the repository with
+ *      idempotencyKey. If the post fails for any non-idempotent reason
+ *      (ACCOUNT_NOT_FOUND, ACCOUNT_INACTIVE, CURRENCY_MISMATCH, etc.),
+ *      the claim is released so the caller can retry with corrected
+ *      inputs.
+ *   7. Confirm the session via the repository with
  *      `postIdempotencyKey` and `linkedTransactionId`.
- *   7. If confirmSession throws DUPLICATE_IDEMPOTENCY_KEY (the session
- *      was already confirmed by a concurrent caller with the same key),
- *      look up the already-linked transaction by idempotency_key and
- *      return it as success (idempotent retry).
+ *   8. If confirmSession throws DUPLICATE_IDEMPOTENCY_KEY (defense in
+ *      depth — should not happen now that the claim pre-empts the race),
+ *      look up the already-linked transaction and return it as success
+ *      (idempotent retry).
  *
- * The post-and-confirm ordering is deliberate: posting first produces a
- * ledger fact that the audit trail can reference even if a concurrent
- * caller raced ahead on confirm. The repository's optimistic lock on
- * status='PENDING_REVIEW' + the UNIQUE on post_idempotency_key together
- * guarantee at most one financial write per idempotency key.
+ * The claim-then-post ordering is the race-safe boundary: posting first
+ * would let two concurrent callers with different keys both write a
+ * transaction before only one wins the optimistic lock on
+ * confirmSession. The claim ensures at most one financial write per
+ * idempotency key per session.
  */
 
 import { decideOcrReview } from "../../adapters/ocr/confidence.js";
@@ -299,8 +311,37 @@ export class ReviewApplicationService {
       );
     }
 
-    // Post the transaction FIRST. sourceEvidenceRef binds the ledger row
-    // to the underlying document id (the M3A SPEC §6.2 audit linkage).
+    // STEP 1: CLAIM the session's post_idempotency_key slot BEFORE any
+    // financial write. This is the race-safe boundary that prevents two
+    // concurrent callers with different idempotency keys from both
+    // posting a transaction. The claim runs as an atomic UPDATE keyed
+    // on (status='PENDING_REVIEW', post_idempotency_key IS NULL OR = ?).
+    // A same-key retry is admitted (the transactions UNIQUE keeps the
+    // retry a no-op at the financial layer); a different-key caller is
+    // rejected with SESSION_CLAIM_CONFLICT before any transaction is
+    // posted.
+    const claim = await this.reviewRepo.claimSession(input.sessionId, input.idempotencyKey);
+    switch (claim.code) {
+      case "CLAIMED":
+      case "ALREADY_CLAIMED_SAME_KEY":
+        break;
+      case "ALREADY_CLAIMED_DIFFERENT_KEY":
+        return fail(
+          "SESSION_CLAIM_CONFLICT",
+          `review session ${input.sessionId} is already claimed with a different post idempotency key`
+        );
+      case "NOT_PENDING":
+        return fail("SESSION_NOT_PENDING", `session ${input.sessionId} is no longer PENDING_REVIEW`);
+      case "KIND_MISMATCH":
+        return fail("SESSION_KIND_MISMATCH", `session ${input.sessionId} is not a RECEIPT`);
+      case "NOT_FOUND":
+        return fail("SESSION_NOT_FOUND", `review session ${input.sessionId} not found`);
+    }
+
+    // STEP 2: Post the transaction. sourceEvidenceRef binds the ledger
+    // row to the underlying document id (the M3A SPEC §6.2 audit
+    // linkage). On non-idempotent failure, release the claim so the
+    // caller can retry with corrected inputs.
     const postResult = await this.txService.postIncomeExpense("EXPENSE", {
       memberId: input.memberId,
       accountId: input.accountId,
@@ -313,14 +354,20 @@ export class ReviewApplicationService {
       ...(input.description !== undefined ? { description: input.description } : {}),
     });
     if (!postResult.ok) {
+      // Release the claim so the caller can retry. Best-effort: a
+      // release failure (e.g. session moved to a terminal state in the
+      // same window) leaves the slot held, which is the safe direction
+      // — the next caller's claim will return ALREADY_CLAIMED_SAME_KEY
+      // and proceed via the transactions UNIQUE.
+      await this.reviewRepo.releaseClaim(input.sessionId, input.idempotencyKey);
       return fail(mapTxPostError(postResult.error.code), postResult.error.message);
     }
 
-    // Confirm the session, binding the post_idempotency_key to the
-    // linked transaction. If a concurrent caller already confirmed this
-    // session with the same idempotency key, the UNIQUE collision
-    // surfaces DUPLICATE_IDEMPOTENCY_KEY; re-find the existing
-    // transaction by idempotency_key so the retry is idempotent.
+    // STEP 3: Confirm the session, binding the post_idempotency_key to
+    // the linked transaction. Defense in depth: if confirmSession still
+    // throws DUPLICATE_IDEMPOTENCY_KEY (should not happen now that the
+    // claim pre-empts the race, but kept as a safety net), re-find the
+    // existing transaction so the retry is idempotent.
     let confirmResult;
     try {
       confirmResult = await this.reviewRepo.confirmSession(

@@ -40,6 +40,7 @@ import { D1CategoryRepository } from "../../src/services/categories/d1-repositor
 import { D1DocumentRepository } from "../../src/services/documents-storage/d1-repository.js";
 import { DocumentApplicationService } from "../../src/services/documents-storage/service.js";
 import { D1ReviewSessionRepository, ReviewApplicationService } from "../../src/services/review/index.js";
+import type { ReviewSessionRepository } from "../../src/services/review/repository.js";
 import {
   D1TransactionsRepository,
   TransactionApplicationService,
@@ -856,5 +857,258 @@ describe("confirmReceipt — failure injection", () => {
       .bind(submit.value.session.id)
       .first<{ status: string }>();
     expect(persisted?.status).toBe("PENDING_REVIEW");
+  });
+});
+
+// ── confirmReceipt — claim / release concurrency and recoverability ──────────
+//
+// These tests prove the claim-then-post-then-confirm ordering produces no
+// orphan or duplicate financial mutations under concurrent confirmations
+// and recovers cleanly from injected mid-write failures. The claim is the
+// race-safe boundary that prevents two concurrent callers with different
+// idempotency keys from both posting a transaction before only one wins
+// the optimistic lock on confirmSession.
+
+describe("confirmReceipt — claim/release concurrency", () => {
+  it("concurrent same-key confirms produce exactly one transaction and one CONFIRMED session", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-same-key");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const inputA = confirmInput(submit.value.session.id, seed.ownerId, {
+      idempotencyKey: "concurrent-key-shared",
+    });
+    const inputB = confirmInput(submit.value.session.id, seed.ownerId, {
+      idempotencyKey: "concurrent-key-shared",
+    });
+
+    const [a, b] = await Promise.all([
+      reviewService.confirmReceipt(inputA),
+      reviewService.confirmReceipt(inputB),
+    ]);
+
+    // Both must succeed (idempotent retry of the same key).
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+
+    // Exactly one transaction row, exactly one linked id — both
+    // confirmations resolve to the canonical post.
+    expect(a.value.transactionId).toBe(b.value.transactionId);
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+
+    // The session is CONFIRMED and bound to the single transaction.
+    const persisted = await db
+      .prepare("SELECT status, post_idempotency_key, linked_transaction_id FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{ status: string; post_idempotency_key: string; linked_transaction_id: number }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe("concurrent-key-shared");
+    expect(persisted?.linked_transaction_id).toBe(a.value.transactionId);
+  });
+
+  it("concurrent different-key confirms produce exactly one transaction and one SESSION_CLAIM_CONFLICT", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-diff-key");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const inputA = confirmInput(submit.value.session.id, seed.ownerId, {
+      idempotencyKey: "concurrent-key-A",
+    });
+    const inputB = confirmInput(submit.value.session.id, seed.ownerId, {
+      idempotencyKey: "concurrent-key-B",
+    });
+
+    const [a, b] = await Promise.all([
+      reviewService.confirmReceipt(inputA),
+      reviewService.confirmReceipt(inputB),
+    ]);
+
+    // Exactly one of the two must succeed; the other must be rejected
+    // with SESSION_CLAIM_CONFLICT. The race-safe claim ensures the
+    // losing caller never reaches the financial write step.
+    const successes = [a, b].filter((r) => r.ok);
+    const failures = [a, b].filter((r) => !r.ok);
+    expect(successes.length).toBe(1);
+    expect(failures.length).toBe(1);
+    if (failures.length !== 1) return;
+    expect(failures[0]?.error.code).toBe("SESSION_CLAIM_CONFLICT");
+
+    // Exactly one transaction row total — no orphan/duplicate mutation.
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+
+    // The session is CONFIRMED and bound to the winner's key + tx.
+    const winnerKey = a.ok ? "concurrent-key-A" : "concurrent-key-B";
+    const persisted = await db
+      .prepare("SELECT status, post_idempotency_key, linked_transaction_id FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{ status: string; post_idempotency_key: string; linked_transaction_id: number }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe(winnerKey);
+  });
+
+  it("a non-idempotent post failure releases the claim so a corrected retry can proceed", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-release-retry");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    // First confirm attempt uses the inactive account — the
+    // transactions service returns ACCOUNT_INACTIVE (a non-idempotent
+    // failure), which the review service must translate and then
+    // release the claim so the corrected retry can proceed.
+    const first = await reviewService.confirmReceipt(
+      confirmInput(submit.value.session.id, seed.ownerId, {
+        accountId: seed.inactiveAccountId,
+        idempotencyKey: "release-retry-key",
+      })
+    );
+    expect(first.ok).toBe(false);
+    if (first.ok) return;
+    expect(first.error.code).toBe("ACCOUNT_INACTIVE");
+
+    // The session must still be PENDING_REVIEW and the claim slot
+    // cleared so the next caller can claim it.
+    const afterFail = await db
+      .prepare("SELECT status, post_idempotency_key FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{ status: string; post_idempotency_key: string | null }>();
+    expect(afterFail?.status).toBe("PENDING_REVIEW");
+    expect(afterFail?.post_idempotency_key).toBeNull();
+
+    // Zero financial mutation from the failed attempt.
+    expect(await countTransactions()).toBe(0);
+    expect(await countLedgerEntries()).toBe(0);
+
+    // Retry with a valid account + the same key — the claim slot is
+    // free again so the new claim succeeds.
+    const second = await reviewService.confirmReceipt(
+      confirmInput(submit.value.session.id, seed.ownerId, {
+        accountId: seed.accountId,
+        idempotencyKey: "release-retry-key",
+      })
+    );
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+
+    // Exactly one transaction row from the retry; session CONFIRMED.
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+    const persisted = await db
+      .prepare("SELECT status, post_idempotency_key, linked_transaction_id FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{ status: string; post_idempotency_key: string; linked_transaction_id: number }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe("release-retry-key");
+    expect(persisted?.linked_transaction_id).toBe(second.value.transactionId);
+  });
+
+  it("a same-key retry after an injected confirm failure resumes and finalizes without a second transaction", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-confirm-retry");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    // Wrap the production reviewRepo so confirmSession throws once,
+    // simulating a forced finalize failure (e.g. D1 edge failure
+    // between the post and the confirm UPDATE). claimSession /
+    // releaseClaim / findById are unchanged so the rest of the flow is
+    // still under test.
+    let confirmCalls = 0;
+    const flakyReviewRepo: ReviewSessionRepository = new Proxy(reviewRepo, {
+      get(target, prop, receiver) {
+        if (prop === "confirmSession") {
+          return async (...args: unknown[]) => {
+            confirmCalls += 1;
+            if (confirmCalls === 1) {
+              throw new Error("forced confirmSession failure");
+            }
+            return (target.confirmSession as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ReviewSessionRepository;
+    const flakyService = new ReviewApplicationService(
+      flakyReviewRepo,
+      docService,
+      txService,
+      accountRepo,
+      categoryRepo
+    );
+
+    const sharedKey = "confirm-retry-key";
+    await expect(
+      flakyService.confirmReceipt(
+        confirmInput(submit.value.session.id, seed.ownerId, { idempotencyKey: sharedKey })
+      )
+    ).rejects.toThrow("forced confirmSession failure");
+
+    // The first attempt successfully posted the transaction (UNIQUE on
+    // idempotency_key kept it persisted) but confirmSession threw.
+    // The session is still PENDING_REVIEW with the same claim slot
+    // held by our key — this is the recoverable mid-write state.
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+    const afterFail = await db
+      .prepare("SELECT status, post_idempotency_key, linked_transaction_id FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{
+        status: string;
+        post_idempotency_key: string | null;
+        linked_transaction_id: number | null;
+      }>();
+    expect(afterFail?.status).toBe("PENDING_REVIEW");
+    expect(afterFail?.post_idempotency_key).toBe(sharedKey);
+    expect(afterFail?.linked_transaction_id).toBeNull();
+
+    // Retry with the SAME key — claim returns ALREADY_CLAIMED_SAME_KEY,
+    // postIncomeExpense sees the existing transaction (created=false),
+    // confirmSession succeeds on attempt #2.
+    const second = await flakyService.confirmReceipt(
+      confirmInput(submit.value.session.id, seed.ownerId, { idempotencyKey: sharedKey })
+    );
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+
+    // No second transaction row was created — the transactions UNIQUE
+    // is the financial-layer idempotency boundary. The session is
+    // CONFIRMED and bound to the original transaction.
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+    const persisted = await db
+      .prepare("SELECT status, post_idempotency_key, linked_transaction_id FROM review_sessions WHERE id = ?")
+      .bind(submit.value.session.id)
+      .first<{ status: string; post_idempotency_key: string; linked_transaction_id: number }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe(sharedKey);
+    expect(persisted?.linked_transaction_id).toBe(second.value.transactionId);
+    // The same transaction id flows back — confirm was finalized
+    // against the original post, not a re-posted one.
+    const originalTx = await db
+      .prepare("SELECT id FROM transactions ORDER BY id ASC LIMIT 1")
+      .first<{ id: number }>();
+    expect(originalTx).not.toBeNull();
+    expect(second.value.transactionId).toBe(originalTx?.id);
   });
 });

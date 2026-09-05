@@ -13,6 +13,7 @@ export {
   type ReviewSessionRepository,
   type UpdateCorrectedPayloadResult,
   type ConfirmSessionResult,
+  type ClaimSessionResult,
 } from "./repository.js";
 
 export { D1ReviewSessionRepository } from "./d1-repository.js";

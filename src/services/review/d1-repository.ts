@@ -27,7 +27,7 @@ import type {
   ReviewStatus,
   ReviewKind,
 } from "./types.js";
-import type { ConfirmSessionResult, ReviewSessionRepository } from "./repository.js";
+import type { ClaimSessionResult, ConfirmSessionResult, ReviewSessionRepository } from "./repository.js";
 
 // ── Row type as stored in SQLite ─────────────────────────────────────────────
 
@@ -153,6 +153,75 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     return rowToSession(row);
   }
 
+  async claimSession(id: number, postIdempotencyKey: string): Promise<ClaimSessionResult> {
+    // Step 1: read the current state so we can distinguish a fresh
+    // claim from a same-key retry without trusting a returned row.
+    const existing = await this.findById(id);
+    if (existing === null) return { code: "NOT_FOUND" };
+    if (existing.status !== "PENDING_REVIEW") return { code: "NOT_PENDING" };
+    if (existing.kind !== "RECEIPT") return { code: "KIND_MISMATCH" };
+
+    // Same-key retry: slot already holds our key from a prior
+    // mid-write crash. The post step's idempotency_key UNIQUE keeps
+    // the retry a no-op at the financial layer.
+    if (existing.postIdempotencyKey === postIdempotencyKey) {
+      return { code: "ALREADY_CLAIMED_SAME_KEY" };
+    }
+    // Different-key conflict: another caller is mid-flight with a
+    // distinct idempotency key. Reject before any financial write.
+    if (existing.postIdempotencyKey !== null) {
+      return { code: "ALREADY_CLAIMED_DIFFERENT_KEY" };
+    }
+
+    // Step 2: slot is NULL — attempt the atomic claim with optimistic
+    // lock on (status, kind, slot IS NULL). A concurrent caller could
+    // have claimed the slot between our SELECT and UPDATE; the WHERE
+    // clause guards against that race.
+    const row = await this.db
+      .prepare(
+        `UPDATE review_sessions
+           SET post_idempotency_key = ?,
+               updated_at = datetime('now', 'utc')
+         WHERE id = ?
+           AND status = 'PENDING_REVIEW'
+           AND kind = 'RECEIPT'
+           AND post_idempotency_key IS NULL
+         RETURNING id`
+      )
+      .bind(postIdempotencyKey, id)
+      .first<{ id: number }>();
+    if (row !== null) return { code: "CLAIMED" };
+
+    // Lost the race to a concurrent claim. Re-check to map to a
+    // precise outcome.
+    const recheck = await this.findById(id);
+    if (recheck === null) return { code: "NOT_FOUND" };
+    if (recheck.status !== "PENDING_REVIEW") return { code: "NOT_PENDING" };
+    if (recheck.kind !== "RECEIPT") return { code: "KIND_MISMATCH" };
+    if (recheck.postIdempotencyKey === postIdempotencyKey) {
+      return { code: "ALREADY_CLAIMED_SAME_KEY" };
+    }
+    return { code: "ALREADY_CLAIMED_DIFFERENT_KEY" };
+  }
+
+  async releaseClaim(id: number, postIdempotencyKey: string): Promise<void> {
+    // Only release when the session is still PENDING_REVIEW AND the
+    // slot currently holds the key we are trying to clear. This
+    // prevents a concurrent confirm/reject from clobbering a terminal
+    // state and prevents clearing a slot a different caller holds.
+    await this.db
+      .prepare(
+        `UPDATE review_sessions
+           SET post_idempotency_key = NULL,
+               updated_at = datetime('now', 'utc')
+         WHERE id = ?
+           AND status = 'PENDING_REVIEW'
+           AND post_idempotency_key = ?`
+      )
+      .bind(id, postIdempotencyKey)
+      .run();
+  }
+
   async confirmSession(
     id: number,
     patch: ConfirmPatch,
@@ -196,10 +265,18 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     }
 
     if (row === null) {
-      // Stale-state lock lost. Confirm whether it was a status move or
-      // a kind mismatch so the service can pick the right error code.
+      // Stale-state lock lost. Distinguish the exact reason so the
+      // service can pick the right error code, AND honor the same-key
+      // retry resume: if the session is already CONFIRMED with the
+      // caller's idempotency key, the retry is a no-op success (the
+      // transactions UNIQUE already kept the financial write to one
+      // row — the claim slot pre-empts the race, but we keep this as a
+      // safety net for direct repository misuse).
       const existing = await this.findById(id);
       if (existing === null) throw new Error("SESSION_NOT_FOUND");
+      if (existing.status === "CONFIRMED" && existing.postIdempotencyKey === patch.postIdempotencyKey) {
+        return { session: existing, created: false };
+      }
       if (existing.status !== expectedStatus) throw new Error("SESSION_NOT_PENDING");
       if (existing.kind !== expectedKind) throw new Error("SESSION_KIND_MISMATCH");
       throw new Error("STALE_STATE");
