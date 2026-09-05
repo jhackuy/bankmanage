@@ -1379,7 +1379,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     await waitFor(() => retryCanResolvePost !== null);
 
     // Let the original caller resolve with its non-idempotent failure.
-    if (originalEnteredPost !== null) originalEnteredPost();
+    if (originalEnteredPost !== null) (originalEnteredPost as () => void)();
     const originalResult = await originalP;
     expect(originalResult.ok).toBe(false);
     if (originalResult.ok) return;
@@ -1408,7 +1408,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     expect(thirdAgainResult.error.code).toBe("SESSION_CLAIM_CONFLICT");
 
     // Release the same-key retry to finalize.
-    if (retryCanResolvePost !== null) retryCanResolvePost();
+    if (retryCanResolvePost !== null) (retryCanResolvePost as () => void)();
     const retryResult = await retryP;
     expect(retryResult.ok).toBe(true);
     if (!retryResult.ok) return;
