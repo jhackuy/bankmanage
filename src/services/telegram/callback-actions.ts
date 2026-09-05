@@ -13,11 +13,12 @@
  *   - `mute`  → mute all remaining reminders for the deposit (delivery-only
  *               effect; deposit state is NOT touched).
  *
- * Actions not implemented in this slice (`remind_tomorrow`, `remind_7_days`,
- * `process_maturity`) are silently acknowledged by the bot service without
- * producing a visible result. The keyboard still advertises them so users
- * see a consistent surface; wiring the real handlers is deferred to a later
- * slice per the P0 bounded repair directive.
+ * These are the only callback actions the production reminder keyboard
+ * advertises (see `defaultReminderKeyboard` in `./reminder-delivery.ts`).
+ * Any other `r:{id}:{action}` value that arrives is treated as
+ * unrecognised and silently acknowledged (the Telegram ack has already
+ * been issued by the caller). No stub or deferred actions are exposed
+ * to users.
  */
 
 import type { SendMessageOptions, TelegramAdapter } from "../../adapters/telegram/interface.js";
@@ -90,9 +91,10 @@ export class TelegramReminderCallbackActions implements ReminderCallbackActions 
         await this.handleMute(ctx.chatId, parsed.reminderId);
         return { producedVisibleResult: true };
       default:
-        // Deferred actions (remind_tomorrow, remind_7_days, process_maturity).
-        // Acknowledge but produce no visible result — the button stays
-        // reachable so the keyboard surface stays stable across slices.
+        // Unrecognised action (e.g. a stale message from a previous
+        // keyboard layout that included buttons this slice no longer
+        // supports). The Telegram ack has already been issued by the
+        // caller; no further state mutation is possible.
         return { producedVisibleResult: false };
     }
   }

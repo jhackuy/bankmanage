@@ -59,16 +59,10 @@ export interface BuildKeyboardParams {
 }
 
 const ACTION_VIEW = "view";
-const ACTION_REMIND_TOMORROW = "remind_tomorrow";
-const ACTION_REMIND_7_DAYS = "remind_7_days";
-const ACTION_PROCESS_MATURITY = "process_maturity";
 const ACTION_MUTE = "mute";
 
 export const REMINDER_ACTIONS = {
   view: ACTION_VIEW,
-  remind_tomorrow: ACTION_REMIND_TOMORROW,
-  remind_7_days: ACTION_REMIND_7_DAYS,
-  process_maturity: ACTION_PROCESS_MATURITY,
   mute: ACTION_MUTE,
 } as const;
 
@@ -264,32 +258,16 @@ export class TelegramReminderDeliveryService {
   }
 }
 
-function defaultReminderKeyboard(params: {
+export function defaultReminderKeyboard(params: {
   reminderId: number;
   depositId: number;
   role: MemberRole;
 }): SendMessageOptions["replyMarkup"] {
   const data = (action: string): string => `r:${params.reminderId}:${action}`;
-  const baseRows: Array<Array<{ text: string; callback_data: string }>> = [
-    [
-      { text: "Remind tomorrow", callback_data: data(ACTION_REMIND_TOMORROW) },
-      { text: "Remind in 7 days", callback_data: data(ACTION_REMIND_7_DAYS) },
-    ],
-    [{ text: "Process maturity", callback_data: data(ACTION_PROCESS_MATURITY) }],
-    [{ text: "Mute future", callback_data: data(ACTION_MUTE) }],
-  ];
-  // "View deposit" lives on its own row to keep it reachable first.
   const inline_keyboard: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: "View deposit", callback_data: data(ACTION_VIEW) }],
-    ...baseRows,
+    [{ text: "Mute future", callback_data: data(ACTION_MUTE) }],
   ];
-  // Only OWNER may initiate maturity closure from the bot keyboard.
-  if (params.role !== "OWNER") {
-    const filtered = inline_keyboard.filter(
-      (row) => !row.some((b) => b.callback_data === data(ACTION_PROCESS_MATURITY))
-    );
-    return { inline_keyboard: filtered };
-  }
   return { inline_keyboard };
 }
 
