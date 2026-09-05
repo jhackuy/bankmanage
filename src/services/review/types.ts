@@ -76,6 +76,10 @@ export interface SubmitForReviewInput {
   readonly documentId: number;
   readonly ocrResult: OcrExtractionResult;
   readonly confirmingMemberId: number;
+  /** Which M3C flow this session belongs to. Defaults to "RECEIPT" when
+   *  not supplied, preserving the original PHASE 1 call sites. DEPOSIT
+   *  and SETTLEMENT require an explicit kind. */
+  readonly kind?: ReviewKind;
   /** DEPOSIT and SETTLEMENT sessions require linking the existing term
    *  deposit that the candidate belongs to. RECEIPT sessions leave this
    *  null at submit time and confirmReceipt confirms the account/category
@@ -123,11 +127,16 @@ export interface InsertReviewSessionInput {
  * Patch passed to `ReviewSessionRepository.confirmSession`. The
  * confirmed payload is the user-confirmed fact set that will be used
  * downstream — not the OCR candidate.
+ *
+ * For DEPOSIT sessions, `depositId` is populated after the term-deposit
+ * draft is created. For RECEIPT / SETTLEMENT sessions it stays null and
+ * `linkedTransactionId` carries the audit linkage instead.
  */
 export interface ConfirmPatch {
   readonly confirmedPayload: Readonly<Record<string, unknown>>;
   readonly postIdempotencyKey: string;
   readonly linkedTransactionId: number | null;
+  readonly depositId: number | null;
 }
 
 /**

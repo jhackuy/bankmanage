@@ -160,13 +160,17 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     return rowToSession(row);
   }
 
-  async claimSession(id: number, postIdempotencyKey: string): Promise<ClaimSessionResult> {
+  async claimSession(
+    id: number,
+    postIdempotencyKey: string,
+    expectedKind: ReviewKind
+  ): Promise<ClaimSessionResult> {
     // Step 1: read the current state so we can distinguish a fresh
     // claim from a same-key retry without trusting a returned row.
     const existing = await this.findById(id);
     if (existing === null) return { code: "NOT_FOUND" };
     if (existing.status !== "PENDING_REVIEW") return { code: "NOT_PENDING" };
-    if (existing.kind !== "RECEIPT") return { code: "KIND_MISMATCH" };
+    if (existing.kind !== expectedKind) return { code: "KIND_MISMATCH" };
 
     // Same-key retry: slot already holds our key from a prior
     // mid-write crash. The post step's idempotency_key UNIQUE keeps
@@ -200,11 +204,11 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
                updated_at = datetime('now', 'utc')
          WHERE id = ?
            AND status = 'PENDING_REVIEW'
-           AND kind = 'RECEIPT'
+           AND kind = ?
            AND post_idempotency_key IS NULL
          RETURNING claim_token`
       )
-      .bind(postIdempotencyKey, claimToken, id)
+      .bind(postIdempotencyKey, claimToken, id, expectedKind)
       .first<{ claim_token: string }>();
     if (row !== null && row.claim_token !== null) {
       return { code: "CLAIMED" };
@@ -215,7 +219,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     const recheck = await this.findById(id);
     if (recheck === null) return { code: "NOT_FOUND" };
     if (recheck.status !== "PENDING_REVIEW") return { code: "NOT_PENDING" };
-    if (recheck.kind !== "RECEIPT") return { code: "KIND_MISMATCH" };
+    if (recheck.kind !== expectedKind) return { code: "KIND_MISMATCH" };
     if (recheck.postIdempotencyKey === postIdempotencyKey) {
       if (recheck.claimToken === null) {
         throw new Error("claim slot held without token");
@@ -240,6 +244,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
                post_idempotency_key = ?,
                claim_token = NULL,
                linked_transaction_id = ?,
+               deposit_id = ?,
                updated_at = datetime('now', 'utc')
          WHERE id = ? AND status = ? AND kind = ?
          RETURNING *`
@@ -248,6 +253,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
         JSON.stringify(patch.confirmedPayload),
         patch.postIdempotencyKey,
         patch.linkedTransactionId,
+        patch.depositId,
         id,
         expectedStatus,
         expectedKind
@@ -273,9 +279,10 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
       // service can pick the right error code, AND honor the same-key
       // retry resume: if the session is already CONFIRMED with the
       // caller's idempotency key, the retry is a no-op success (the
-      // transactions UNIQUE already kept the financial write to one
-      // row — the claim slot pre-empts the race, but we keep this as a
-      // safety net for direct repository misuse).
+      // financial-layer UNIQUE on idempotency_key already kept the
+      // downstream write to one row — the claim slot pre-empts the
+      // race, but we keep this as a safety net for direct repository
+      // misuse).
       const existing = await this.findById(id);
       if (existing === null) throw new Error("SESSION_NOT_FOUND");
       if (existing.status === "CONFIRMED" && existing.postIdempotencyKey === patch.postIdempotencyKey) {

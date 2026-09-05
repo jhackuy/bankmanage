@@ -106,21 +106,28 @@ export interface ReviewSessionRepository {
    * Reserve the session's `post_idempotency_key` slot for a caller.
    *
    * The reservation runs as an atomic UPDATE with an optimistic lock on
-   * `status = 'PENDING_REVIEW'`. It succeeds (CLAIMED) only when the
-   * session is still PENDING_REVIEW and the slot is either NULL or
-   * already holds the same key.
+   * `status = 'PENDING_REVIEW'` AND the supplied `expectedKind`. It
+   * succeeds (CLAIMED) only when the session is still PENDING_REVIEW,
+   * matches the kind, and the slot is either NULL or already holds the
+   * same key.
    *
    * The ALREADY_CLAIMED_SAME_KEY branch is the same-key retry path: a
    * previous attempt claimed the slot but failed mid-write (post or
    * confirm step), so the caller is admitted again to resume the flow.
-   * The transactions UNIQUE on idempotency_key keeps the retry a no-op
-   * at the financial layer.
+   * The transactions / term-deposits UNIQUE on the idempotency key keeps
+   * the retry a no-op at the financial layer.
    *
    * The ALREADY_CLAIMED_DIFFERENT_KEY branch prevents two concurrent
-   * confirmations with different idempotency keys from both posting
-   * transactions. The service surfaces this as SESSION_CLAIM_CONFLICT.
+   * confirmations with different idempotency keys from both producing
+   * downstream writes. The service surfaces this as SESSION_CLAIM_CONFLICT.
+   *
+   * `expectedKind` is the kind the caller intends to confirm — e.g.
+   * "RECEIPT" for `confirmReceipt`, "DEPOSIT" for `confirmDeposit`.
+   * Sessions of other kinds surface KIND_MISMATCH so a caller cannot
+   * reuse a RECEIPT idempotency key to finalize a DEPOSIT session (or
+   * vice versa).
    */
-  claimSession(id: number, postIdempotencyKey: string): Promise<ClaimSessionResult>;
+  claimSession(id: number, postIdempotencyKey: string, expectedKind: ReviewKind): Promise<ClaimSessionResult>;
 
   /**
    * Move a PENDING_REVIEW session to REJECTED with an optional reason.

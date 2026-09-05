@@ -42,6 +42,10 @@ import { DocumentApplicationService } from "../../src/services/documents-storage
 import { D1ReviewSessionRepository, ReviewApplicationService } from "../../src/services/review/index.js";
 import type { ReviewSessionRepository } from "../../src/services/review/repository.js";
 import {
+  D1TermDepositRepository,
+  TermDepositApplicationService,
+} from "../../src/services/term-deposit/index.js";
+import {
   D1TransactionsRepository,
   TransactionApplicationService,
 } from "../../src/services/transactions/index.js";
