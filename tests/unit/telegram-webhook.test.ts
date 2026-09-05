@@ -61,7 +61,7 @@ beforeEach(async () => {
   router = buildTelegramWebhookRouter({
     adapter,
     identityRepository: repo,
-    launcher: miniAppLauncherFromEnv(MINI_APP_URL),
+    miniAppLauncher: miniAppLauncherFromEnv(MINI_APP_URL),
     deduper,
   });
 });

@@ -132,22 +132,18 @@ export class D1ReminderRepository implements ReminderRepository {
     return row === null ? null : rowToRecord(row);
   }
 
-  async markMuted(id: number): Promise<ReminderRecord | null> {
-    // Muting is only valid from PENDING. A MUTED/DELIVERED/CANCELLED row
-    // is intentionally left alone — muting a delivered reminder would
-    // silently change the user's understanding of the reminder history.
-    const row = await this.db
+  async markMutedForDeposit(depositId: number): Promise<number> {
+    const result = await this.db
       .prepare(
         `UPDATE term_deposit_reminders
          SET status = 'MUTED',
              muted_at = datetime('now', 'utc'),
              updated_at = datetime('now', 'utc')
-         WHERE id = ? AND status = 'PENDING'
-         RETURNING *`
+         WHERE deposit_id = ? AND status = 'PENDING'`
       )
-      .bind(id)
-      .first<ReminderRow>();
-    return row === null ? null : rowToRecord(row);
+      .bind(depositId)
+      .run();
+    return result.meta.changes ?? 0;
   }
 
   async markDelivered(id: number): Promise<ReminderRecord | null> {

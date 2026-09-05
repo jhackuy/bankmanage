@@ -163,6 +163,7 @@ describe("Mini App auth Hono route", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       maxAgeSeconds: 3600,
+      nowSeconds: NOW_SECONDS,
     });
   }
 

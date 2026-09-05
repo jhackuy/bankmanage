@@ -63,11 +63,12 @@ export interface ReminderRepository {
   findById(id: number): Promise<ReminderRecord | null>;
 
   /**
-   * Mark a PENDING reminder as MUTED. Returns the updated row. MUTED is a
-   * delivery-pause state; it does NOT alter deposit business state. Returns
-   * null if the id does not exist or is no longer PENDING.
+   * Mark every PENDING reminder for the deposit as MUTED. The "Mute future"
+   * button suppresses all remaining Telegram messages for the deposit, not
+   * just one row. Returns the number of rows whose status moved to MUTED.
+   * MUTED is a delivery-pause state; it does NOT alter deposit business state.
    */
-  markMuted(id: number): Promise<ReminderRecord | null>;
+  markMutedForDeposit(depositId: number): Promise<number>;
 
   /**
    * Mark a reminder as DELIVERED. Delivery is out of M1C scope; the D1

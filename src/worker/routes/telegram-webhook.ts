@@ -50,7 +50,7 @@ export interface TelegramWebhookBuildInput {
   /** Concrete adapter wired to the bot token (real implementation). */
   readonly adapter: TelegramAdapter;
   readonly identityRepository: TelegramIdentityRepository;
-  readonly launcher: MiniAppLauncher;
+  readonly miniAppLauncher: MiniAppLauncher;
   /** Optional override for the in-memory update deduper. */
   readonly deduper?: import("../../services/telegram/update-deduper.js").UpdateDeduper;
 }

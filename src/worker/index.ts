@@ -53,11 +53,11 @@ app.post("/telegram/webhook", async (c) => {
   }
   const adapter = new CloudflareTelegramAdapter({ botToken });
   const identityRepository = new D1TelegramIdentityRepository(c.env.DB);
-  const launcher = miniAppLauncherFromEnv(miniAppUrlFromEnv(c.env));
+  const miniAppLauncher = miniAppLauncherFromEnv(miniAppUrlFromEnv(c.env));
   const router = buildTelegramWebhookRouter({
     adapter,
     identityRepository,
-    launcher,
+    miniAppLauncher,
     deduper: new InMemoryUpdateDeduper(),
   });
   return router.fetch(c.req.raw, c.env, c.executionCtx as never);

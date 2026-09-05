@@ -35,6 +35,8 @@ export interface MiniAppAuthRouterInput {
   readonly identityRepository: TelegramIdentityRepository;
   /** Maximum age (seconds) before the initData payload is rejected. */
   readonly maxAgeSeconds?: number;
+  /** "now" override (epoch seconds) for deterministic tests. */
+  readonly nowSeconds?: number;
 }
 
 export function buildMiniAppAuthRouter(input: MiniAppAuthRouterInput): Hono<{ Bindings: Env }> {
@@ -42,6 +44,7 @@ export function buildMiniAppAuthRouter(input: MiniAppAuthRouterInput): Hono<{ Bi
     botToken: input.botToken,
     identityRepository: input.identityRepository,
     ...(input.maxAgeSeconds !== undefined ? { maxAgeSeconds: input.maxAgeSeconds } : {}),
+    ...(input.nowSeconds !== undefined ? { nowSeconds: input.nowSeconds } : {}),
   });
 
   const router = new Hono<{ Bindings: Env }>();
