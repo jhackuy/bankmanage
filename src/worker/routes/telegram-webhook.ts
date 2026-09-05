@@ -31,7 +31,6 @@ import { TelegramBotService } from "../../services/telegram/index.js";
 import type { MiniAppLauncher } from "../../services/telegram/bot-service.js";
 import type { TelegramAdapter } from "../../adapters/telegram/interface.js";
 import type { TelegramIdentityRepository } from "../../services/telegram/identity-repository.js";
-import type { UpdateDeduper } from "../../services/telegram/update-deduper.js";
 import type { AllowedUserIds } from "../../services/telegram/allowed-user-ids.js";
 
 const SECRET_HEADER = "x-telegram-bot-api-secret-token";
@@ -65,9 +64,7 @@ export interface TelegramWebhookBuildInput {
  * `src/worker/index.ts` free of wiring code and makes the dependency
  * tree testable.
  */
-export function buildTelegramWebhookRouter(
-  input: TelegramWebhookBuildInput & { readonly deduper?: UpdateDeduper }
-): Hono<{ Bindings: Env }> {
+export function buildTelegramWebhookRouter(input: TelegramWebhookBuildInput): Hono<{ Bindings: Env }> {
   if (input.allowedUserIds === null) {
     throw new Error("TelegramWebhook: TELEGRAM_ALLOWED_USER_IDS is missing or malformed");
   }

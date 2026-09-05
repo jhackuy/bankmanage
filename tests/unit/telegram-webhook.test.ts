@@ -20,6 +20,7 @@ import {
 } from "../../src/adapters/telegram/fake.js";
 import { D1TelegramIdentityRepository } from "../../src/services/telegram/d1-identity-repository.js";
 import { InMemoryUpdateDeduper } from "../../src/services/telegram/update-deduper.js";
+import { parseAllowedUserIds } from "../../src/services/telegram/allowed-user-ids.js";
 import {
   buildTelegramWebhookRouter,
   miniAppLauncherFromEnv,
@@ -62,7 +63,32 @@ beforeEach(async () => {
     adapter,
     identityRepository: repo,
     miniAppLauncher: miniAppLauncherFromEnv(MINI_APP_URL),
+    allowedUserIds: parseAllowedUserIds(`${FAKE_OWNER_USER_ID},${FAKE_MEMBER_USER_ID}`),
     deduper,
+  });
+});
+
+describe("Allowlist fail-closed", () => {
+  it("fails closed when the allowlist binding is missing", () => {
+    expect(() =>
+      buildTelegramWebhookRouter({
+        adapter,
+        identityRepository: repo,
+        miniAppLauncher: miniAppLauncherFromEnv(MINI_APP_URL),
+        allowedUserIds: null,
+      })
+    ).toThrow("TELEGRAM_ALLOWED_USER_IDS is missing or malformed");
+  });
+
+  it("fails closed when the allowlist binding is malformed", () => {
+    expect(() =>
+      buildTelegramWebhookRouter({
+        adapter,
+        identityRepository: repo,
+        miniAppLauncher: miniAppLauncherFromEnv(MINI_APP_URL),
+        allowedUserIds: parseAllowedUserIds("not-a-valid-binding"),
+      })
+    ).toThrow("TELEGRAM_ALLOWED_USER_IDS is missing or malformed");
   });
 });
 
