@@ -31,6 +31,8 @@ import { TelegramBotService } from "../../services/telegram/index.js";
 import type { MiniAppLauncher } from "../../services/telegram/bot-service.js";
 import type { TelegramAdapter } from "../../adapters/telegram/interface.js";
 import type { TelegramIdentityRepository } from "../../services/telegram/identity-repository.js";
+import type { UpdateDeduper } from "../../services/telegram/update-deduper.js";
+import type { AllowedUserIds } from "../../services/telegram/allowed-user-ids.js";
 
 const SECRET_HEADER = "x-telegram-bot-api-secret-token";
 
@@ -51,6 +53,8 @@ export interface TelegramWebhookBuildInput {
   readonly adapter: TelegramAdapter;
   readonly identityRepository: TelegramIdentityRepository;
   readonly miniAppLauncher: MiniAppLauncher;
+  /** Parsed allowlist — typically obtained via `readAllowedUserIds(env)`. */
+  readonly allowedUserIds: AllowedUserIds | null;
   /** Optional override for the in-memory update deduper. */
   readonly deduper?: import("../../services/telegram/update-deduper.js").UpdateDeduper;
 }
@@ -61,8 +65,19 @@ export interface TelegramWebhookBuildInput {
  * `src/worker/index.ts` free of wiring code and makes the dependency
  * tree testable.
  */
-export function buildTelegramWebhookRouter(input: TelegramWebhookBuildInput): Hono<{ Bindings: Env }> {
-  const botService = new TelegramBotService(input);
+export function buildTelegramWebhookRouter(
+  input: TelegramWebhookBuildInput & { readonly deduper?: UpdateDeduper }
+): Hono<{ Bindings: Env }> {
+  if (input.allowedUserIds === null) {
+    throw new Error("TelegramWebhook: TELEGRAM_ALLOWED_USER_IDS is missing or malformed");
+  }
+  const botService = new TelegramBotService({
+    adapter: input.adapter,
+    identityRepository: input.identityRepository,
+    miniAppLauncher: input.miniAppLauncher,
+    allowedUserIds: input.allowedUserIds,
+    ...(input.deduper !== undefined ? { deduper: input.deduper } : {}),
+  });
   const router = new Hono<{ Bindings: Env }>();
 
   router.post("*", async (c) => {

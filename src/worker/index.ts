@@ -20,7 +20,9 @@ import { buildTelegramWebhookRouter, miniAppLauncherFromEnv } from "./routes/tel
 import { buildMiniAppAuthRouter } from "./routes/telegram-mini-app.js";
 import { CloudflareTelegramAdapter } from "../adapters/telegram/cloudflare-http.js";
 import { D1TelegramIdentityRepository } from "../services/telegram/d1-identity-repository.js";
-import { InMemoryUpdateDeduper } from "../services/telegram/update-deduper.js";
+import { D1UpdateDeduper } from "../services/telegram/d1-update-deduper.js";
+import { readAllowedUserIds } from "../services/telegram/allowed-user-ids.js";
+import type { D1Database } from "../adapters/d1/types.js";
 import type { Env } from "./env.js";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -36,9 +38,14 @@ app.post("/api/telegram-mini-app-auth", async (c) => {
   if (typeof botToken !== "string" || botToken.length === 0) {
     return c.json({ error: "Bot token not configured" }, 503);
   }
+  const allowed = readAllowedUserIds(c.env as unknown as Record<string, unknown>);
+  if (allowed === null) {
+    return c.json({ error: "Allowlist not configured" }, 503);
+  }
   const router = buildMiniAppAuthRouter({
     botToken,
-    identityRepository: new D1TelegramIdentityRepository(c.env.DB),
+    identityRepository: new D1TelegramIdentityRepository(c.env.DB as unknown as D1Database),
+    allowedUserIds: allowed,
   });
   return router.fetch(c.req.raw, c.env, c.executionCtx as never);
 });
@@ -51,14 +58,24 @@ app.post("/telegram/webhook", async (c) => {
   if (typeof botToken !== "string" || botToken.length === 0) {
     return c.json({ error: "Bot token not configured" }, 503);
   }
+  const allowed = readAllowedUserIds(c.env as unknown as Record<string, unknown>);
+  if (allowed === null) {
+    return c.json({ error: "Allowlist not configured" }, 503);
+  }
+  const db = c.env.DB as unknown as D1Database;
   const adapter = new CloudflareTelegramAdapter({ botToken });
-  const identityRepository = new D1TelegramIdentityRepository(c.env.DB);
+  const identityRepository = new D1TelegramIdentityRepository(db);
   const miniAppLauncher = miniAppLauncherFromEnv(miniAppUrlFromEnv(c.env));
+  // D1-backed deduper: the UNIQUE constraint on update_id (migration 0014)
+  // is the race-safe boundary across Worker isolates. An in-memory deduper
+  // would be wiped by isolate recycling and never span isolates.
+  const deduper = new D1UpdateDeduper(db);
   const router = buildTelegramWebhookRouter({
     adapter,
     identityRepository,
     miniAppLauncher,
-    deduper: new InMemoryUpdateDeduper(),
+    deduper,
+    allowedUserIds: allowed,
   });
   return router.fetch(c.req.raw, c.env, c.executionCtx as never);
 });

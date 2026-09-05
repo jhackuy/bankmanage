@@ -25,14 +25,16 @@ import { Hono } from "hono";
 import type { Env } from "../env.js";
 import { TelegramMiniAppAuthService } from "../../services/telegram/mini-app-auth.js";
 import type { TelegramIdentityRepository } from "../../services/telegram/identity-repository.js";
+import { readAllowedUserIds } from "../../services/telegram/allowed-user-ids.js";
 
 const INIT_DATA_HEADER = "x-telegram-init-data";
-const INIT_DATA_QUERY = "init_data";
 
 export interface MiniAppAuthRouterInput {
   /** The Cloudflare-bound bot token. Never logged, never echoed. */
   readonly botToken: string;
   readonly identityRepository: TelegramIdentityRepository;
+  /** Parsed allowlist — typically obtained via `readAllowedUserIds(env)`. */
+  readonly allowedUserIds: ReturnType<typeof readAllowedUserIds>;
   /** Maximum age (seconds) before the initData payload is rejected. */
   readonly maxAgeSeconds?: number;
   /** "now" override (epoch seconds) for deterministic tests. */
@@ -40,9 +42,17 @@ export interface MiniAppAuthRouterInput {
 }
 
 export function buildMiniAppAuthRouter(input: MiniAppAuthRouterInput): Hono<{ Bindings: Env }> {
+  if (input.allowedUserIds === null) {
+    // Fail closed at build time when the binding is malformed. The Worker
+    // entry point should already have surfaced a 503 from the same check,
+    // but defence-in-depth here keeps the service unusable from any other
+    // mount path (e.g. tests, future routes).
+    throw new Error("TelegramMiniAppAuth: TELEGRAM_ALLOWED_USER_IDS is missing or malformed");
+  }
   const authService = new TelegramMiniAppAuthService({
     botToken: input.botToken,
     identityRepository: input.identityRepository,
+    allowedUserIds: input.allowedUserIds,
     ...(input.maxAgeSeconds !== undefined ? { maxAgeSeconds: input.maxAgeSeconds } : {}),
     ...(input.nowSeconds !== undefined ? { nowSeconds: input.nowSeconds } : {}),
   });
@@ -50,8 +60,10 @@ export function buildMiniAppAuthRouter(input: MiniAppAuthRouterInput): Hono<{ Bi
   const router = new Hono<{ Bindings: Env }>();
 
   router.post("*", async (c) => {
-    const initData =
-      c.req.header(INIT_DATA_HEADER) ?? new URL(c.req.url).searchParams.get(INIT_DATA_QUERY) ?? null;
+    // SECURITY: header-only. URLs are routinely logged by proxies, browsers,
+    // and Telegram's own telemetry; we never accept the raw initData as a
+    // query-string parameter.
+    const initData = c.req.header(INIT_DATA_HEADER) ?? null;
     if (initData === null || initData.length === 0) {
       return c.json({ error: "Missing initData" }, 400);
     }

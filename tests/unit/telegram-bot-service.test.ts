@@ -18,8 +18,11 @@ import {
 } from "../../src/adapters/telegram/fake.js";
 import { D1TelegramIdentityRepository } from "../../src/services/telegram/d1-identity-repository.js";
 import { TelegramBotService } from "../../src/services/telegram/bot-service.js";
+import { parseAllowedUserIds } from "../../src/services/telegram/allowed-user-ids.js";
 
 const MINI_APP_URL = "https://example.invalid/mini-app";
+
+const allowedUserIds = parseAllowedUserIds(`${FAKE_OWNER_USER_ID},${FAKE_MEMBER_USER_ID}`)!;
 
 let db: FakeD1Database;
 let adapter: FakeTelegramAdapter;
@@ -36,6 +39,7 @@ beforeEach(async () => {
     miniAppLauncher: {
       buildLaunchButton: (_chatId: string) => ({ text: "Open", url: MINI_APP_URL }),
     },
+    allowedUserIds,
   });
 
   const owner = await db
@@ -160,6 +164,7 @@ describe("TelegramBotService callback handling", () => {
       miniAppLauncher: {
         buildLaunchButton: (_chatId: string) => ({ text: "Open", url: MINI_APP_URL }),
       },
+      allowedUserIds,
     });
 
     await slowBot.dispatchUpdate(callbackUpdate(FAKE_OWNER_USER_ID, 200, "noop", "cbq_001"));

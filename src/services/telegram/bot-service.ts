@@ -35,6 +35,7 @@ import type {
   VerifiedTelegramUser,
 } from "./update-envelope.js";
 import { parseTelegramUpdate } from "./update-parser.js";
+import type { AllowedUserIds } from "./allowed-user-ids.js";
 
 const START_COMMAND = "/start";
 
@@ -57,6 +58,7 @@ export interface TelegramBotServiceOptions {
   readonly adapter: TelegramAdapter;
   readonly identityRepository: TelegramIdentityRepository;
   readonly miniAppLauncher: MiniAppLauncher;
+  readonly allowedUserIds: AllowedUserIds;
   readonly deduper?: UpdateDeduper;
 }
 
@@ -79,12 +81,14 @@ export class TelegramBotService {
   private readonly _adapter: TelegramAdapter;
   private readonly _identities: TelegramIdentityRepository;
   private readonly _launcher: MiniAppLauncher;
+  private readonly _allowed: AllowedUserIds;
   private readonly _deduper: UpdateDeduper;
 
   constructor(opts: TelegramBotServiceOptions) {
     this._adapter = opts.adapter;
     this._identities = opts.identityRepository;
     this._launcher = opts.miniAppLauncher;
+    this._allowed = opts.allowedUserIds;
     this._deduper = opts.deduper ?? new InMemoryUpdateDeduper();
   }
 
@@ -102,7 +106,7 @@ export class TelegramBotService {
       return { updateId: -1, handled: false, bot: { kind: "REJECTED", reason: "Malformed update" } };
     }
 
-    if (!this._deduper.tryClaim(envelope.updateId)) {
+    if (!(await this._deduper.tryClaim(envelope.updateId))) {
       return {
         updateId: envelope.updateId,
         handled: false,
@@ -131,7 +135,14 @@ export class TelegramBotService {
     if (message.from === null) {
       return { kind: "IGNORED", reason: "Message has no sender" };
     }
-    const identity = await this._identities.findByTelegramUserId(String(message.from.id));
+    const senderId = String(message.from.id);
+    // SPEC §2: every webhook update is checked against the two-user
+    // allowlist. We intersect the managed binding with the persisted
+    // identity — either check alone is insufficient.
+    if (!this._allowed.ids.has(senderId)) {
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+    const identity = await this._identities.findByTelegramUserId(senderId);
     if (identity === null) {
       return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
     }
@@ -173,7 +184,12 @@ export class TelegramBotService {
     // returns. We acknowledge first, then perform any real follow-up.
     await this._adapter.answerCallbackQuery(query.id, "Working...");
 
-    const identity = await this._identities.findByTelegramUserId(String(query.from.id));
+    const senderId = String(query.from.id);
+    if (!this._allowed.ids.has(senderId)) {
+      // Already acknowledged above — no further state mutation is possible.
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+    const identity = await this._identities.findByTelegramUserId(senderId);
     if (identity === null) {
       // Already acknowledged above — no further state mutation is possible.
       return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };

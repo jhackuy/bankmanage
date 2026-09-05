@@ -4,25 +4,26 @@
  * SPEC.md §9: "Duplicate button taps must not duplicate financial writes."
  * That requirement applies across both callback_query and message updates.
  *
- * Cloudflare Workers run as many independent isolates as the runtime
- * decides, but a single isolate observes update_ids strictly in
- * monotonically increasing order from Telegram. The cheapest correct
- * dedup at the webhook boundary is therefore an in-memory LRU-ish map
- * keyed by update_id with a TTL window (just larger than the longest
- * plausible retry interval).
+ * Two implementations live here:
+ *   - InMemoryUpdateDeduper — useful in tests and single-isolate contexts;
+ *     NOT safe for production because Cloudflare Workers run many
+ *     isolates concurrently and isolates are recycled.
+ *   - D1UpdateDeduper — production-safe. Backed by a UNIQUE constraint on
+ *     update_id in migration 0014. The SQL boundary is the race-safe
+ *     claim; in-process state is intentionally absent.
  *
  * The webhook handler treats a seen update_id as a duplicate replay:
  *   - it must NOT re-send messages;
  *   - it may return 200 immediately so Telegram stops retrying.
  *
- * If two workers observe the same update concurrently, the existing
- * transaction idempotency inside the deposit / ledger services (UNIQUE
- * (deposit_id, offset_kind) etc.) is the second line of defence.
+ * `tryClaim` is async because the D1 implementation must round-trip to the
+ * database to honour the UNIQUE constraint. The in-memory implementation
+ * still returns a resolved promise so callers do not branch on shape.
  */
 
 export interface UpdateDeduper {
   /** Returns true if this is the first time the id has been seen in the TTL window. */
-  tryClaim(updateId: number): boolean;
+  tryClaim(updateId: number): Promise<boolean>;
   /** Clear all tracked entries (used by tests; not by the runtime). */
   reset(): void;
   /** Number of currently tracked ids — useful for assertions and capacity tests. */
@@ -39,7 +40,7 @@ export class InMemoryUpdateDeduper implements UpdateDeduper {
     this._maxSize = options.maxSize ?? 4096;
   }
 
-  tryClaim(updateId: number): boolean {
+  async tryClaim(updateId: number): Promise<boolean> {
     if (!Number.isSafeInteger(updateId) || updateId <= 0) {
       return false;
     }

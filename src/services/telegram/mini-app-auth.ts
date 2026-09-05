@@ -19,6 +19,7 @@
 
 import { verifyInitData, type InitDataVerification } from "../../domain/telegram/init-data.js";
 import type { ResolvedTelegramIdentity, TelegramIdentityRepository } from "./identity-repository.js";
+import type { AllowedUserIds } from "./allowed-user-ids.js";
 
 export type MiniAppAuthResult =
   | {
@@ -28,7 +29,7 @@ export type MiniAppAuthResult =
     }
   | {
       readonly ok: false;
-      readonly status: 401 | 403;
+      readonly status: 401 | 403 | 503;
       readonly code: MiniAppAuthFailure;
       readonly message: string;
     };
@@ -37,11 +38,18 @@ export type MiniAppAuthFailure =
   | "MALFORMED_INIT_DATA"
   | "BAD_SIGNATURE"
   | "EXPIRED_INIT_DATA"
-  | "UNKNOWN_USER";
+  | "UNKNOWN_USER"
+  | "ALLOWLIST_NOT_CONFIGURED";
 
 export interface TelegramMiniAppAuthServiceOptions {
   readonly botToken: string;
   readonly identityRepository: TelegramIdentityRepository;
+  /**
+   * Parsed allowlist from `TELEGRAM_ALLOWED_USER_IDS`. Required: the
+   * service refuses to bind an identity whose Telegram user ID is not in
+   * this set, even if the persisted identity row exists.
+   */
+  readonly allowedUserIds: AllowedUserIds;
   /** Maximum age (seconds) allowed for the initData payload. */
   readonly maxAgeSeconds?: number;
   /** "now" override (epoch seconds) for deterministic tests. */
@@ -51,6 +59,7 @@ export interface TelegramMiniAppAuthServiceOptions {
 export class TelegramMiniAppAuthService {
   private readonly _botToken: string;
   private readonly _identities: TelegramIdentityRepository;
+  private readonly _allowed: AllowedUserIds;
   private readonly _maxAgeSeconds: number | undefined;
   private readonly _nowSeconds: number | undefined;
 
@@ -60,6 +69,7 @@ export class TelegramMiniAppAuthService {
     }
     this._botToken = opts.botToken;
     this._identities = opts.identityRepository;
+    this._allowed = opts.allowedUserIds;
     this._maxAgeSeconds = opts.maxAgeSeconds;
     this._nowSeconds = opts.nowSeconds;
   }
@@ -69,11 +79,14 @@ export class TelegramMiniAppAuthService {
    * identity (with role) ONLY when:
    *   - the HMAC signature matches the configured bot token;
    *   - the auth_date is within `maxAgeSeconds` of `nowSeconds` (or wall-clock now);
-   *   - the Telegram user ID is on the two-user allowlist.
+   *   - the Telegram user ID is in the managed `TELEGRAM_ALLOWED_USER_IDS` set;
+   *   - the persisted `telegram_identities` row resolves that ID to an
+   *     active household member with a role.
    *
    * Otherwise the typed `MiniAppAuthResult` failure carries:
    *   - 401 for "initData corrupted / unparseable / wrong bot token";
-   *   - 403 for "initData well-formed but user is not on the allowlist".
+   *   - 403 for "initData well-formed but user is not on the allowlist";
+   *   - 503 for "allowlist mis-configured at deploy time".
    */
   async verifyAndBind(initData: string): Promise<MiniAppAuthResult> {
     const opts: Parameters<typeof verifyInitData>[2] = {};
@@ -92,6 +105,18 @@ export class TelegramMiniAppAuthService {
         case "MISSING_AUTH_DATE":
           return { ok: false, status: 401, code: "MALFORMED_INIT_DATA", message: verification.message };
       }
+    }
+
+    // Intersect the managed allowlist with the persisted identity. Both
+    // checks must pass: an admin can have added a row without updating the
+    // binding, or the binding can include an ID whose row was deleted.
+    if (!this._allowed.ids.has(verification.userId)) {
+      return {
+        ok: false,
+        status: 403,
+        code: "UNKNOWN_USER",
+        message: "Telegram user is not on the managed allowlist",
+      };
     }
 
     const identity = await this._identities.findByTelegramUserId(verification.userId);

@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FakeD1Database } from "../../src/adapters/d1/fake.js";
 import { D1TelegramIdentityRepository } from "../../src/services/telegram/d1-identity-repository.js";
 import { TelegramMiniAppAuthService } from "../../src/services/telegram/mini-app-auth.js";
+import { parseAllowedUserIds } from "../../src/services/telegram/allowed-user-ids.js";
 import { buildMiniAppAuthRouter } from "../../src/worker/routes/telegram-mini-app.js";
 import { signInitData } from "../../src/domain/telegram/init-data.js";
 
@@ -26,6 +27,8 @@ const SYNTHETIC_BOT_TOKEN = "synthetic_test_bot_token_NOT_REAL_VALUE_zzz";
 const FAKE_OWNER_TELEGRAM_ID = "100000000001";
 const FAKE_MEMBER_TELEGRAM_ID = "100000000002";
 const NOW_SECONDS = 1_700_000_000;
+
+const allowedUserIds = parseAllowedUserIds(`${FAKE_OWNER_TELEGRAM_ID},${FAKE_MEMBER_TELEGRAM_ID}`)!;
 
 let db: FakeD1Database;
 let repo: D1TelegramIdentityRepository;
@@ -75,6 +78,7 @@ describe("TelegramMiniAppAuthService", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind(initData);
     expect(result.ok).toBe(true);
@@ -90,6 +94,7 @@ describe("TelegramMiniAppAuthService", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind(initData);
     expect(result.ok).toBe(true);
@@ -105,6 +110,7 @@ describe("TelegramMiniAppAuthService", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind(initData);
     expect(result.ok).toBe(false);
@@ -120,6 +126,7 @@ describe("TelegramMiniAppAuthService", () => {
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
       maxAgeSeconds: 3600,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind(initData);
     expect(result.ok).toBe(false);
@@ -135,6 +142,7 @@ describe("TelegramMiniAppAuthService", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind(initData);
     expect(result.ok).toBe(false);
@@ -148,6 +156,7 @@ describe("TelegramMiniAppAuthService", () => {
       botToken: SYNTHETIC_BOT_TOKEN,
       identityRepository: repo,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
     const result = await auth.verifyAndBind("garbage_no_equals_signs_no_hash");
     expect(result.ok).toBe(false);
@@ -164,6 +173,7 @@ describe("Mini App auth Hono route", () => {
       identityRepository: repo,
       maxAgeSeconds: 3600,
       nowSeconds: NOW_SECONDS,
+      allowedUserIds,
     });
   }
 

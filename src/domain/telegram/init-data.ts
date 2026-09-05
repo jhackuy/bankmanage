@@ -6,11 +6,13 @@
  *   1. Parse the incoming `initData` URL-encoding.
  *   2. Pull out the `hash` field — the rest are `data-check-string` fields.
  *   3. Build the data-check-string: sort the remaining field=value pairs by
- *      field name, join with '\n', then HMAC-SHA256 it with the secret key
- *      `SHA-256(bot_token)`.
- *   4. Compare the computed 64-hex HMAC to the provided `hash` field using
- *      a constant-time comparison. Tampered or unknown initData fails here.
- *   5. Check `auth_date` is within the freshness window.
+ *      field name, join with '\n'.
+ *   4. Derive the secret key as HMAC-SHA256("WebAppData", bot_token) — NOT
+ *      a raw SHA-256 of the bot token. The literal key string "WebAppData"
+ *      is fixed by the Telegram Mini Apps specification.
+ *   5. Compute HMAC-SHA256(secret_key, data_check_string) and compare the
+ *      64-hex digest to the provided `hash` field in constant time.
+ *   6. Check `auth_date` is within the freshness window.
  *
  * The module never throws for expected auth failures — it returns a typed
  * `InitDataVerification` result. Throws are reserved for "invalid argument
@@ -168,7 +170,7 @@ export async function verifyInitData(
   }
 
   const dataCheckString = buildDataCheckString(fields);
-  const secretKey = await sha256Bytes(botToken);
+  const secretKey = await hmacSha256BytesFromString(WEB_APP_DATA_KEY, botToken);
   const computed = await hmacSha256Bytes(secretKey, dataCheckString);
   const computedHex = hexFromBytes(computed);
 
@@ -218,9 +220,25 @@ export async function verifyInitData(
 export async function signInitData(initData: string, botToken: string): Promise<string> {
   const fields = parseInitDataRaw(initData);
   const dataCheckString = buildDataCheckString(fields);
-  const secretKey = await sha256Bytes(botToken);
+  const secretKey = await hmacSha256BytesFromString(WEB_APP_DATA_KEY, botToken);
   const computed = await hmacSha256Bytes(secretKey, dataCheckString);
   return hexFromBytes(computed);
+}
+
+/** Fixed key string for the first HMAC step in Telegram Mini App verification. */
+const WEB_APP_DATA_KEY = "WebAppData";
+
+/** HMAC-SHA256 with a UTF-8 string key and UTF-8 string data. */
+async function hmacSha256BytesFromString(keyString: string, dataString: string): Promise<Uint8Array> {
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(keyString) as BufferSource,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(dataString));
+  return new Uint8Array(sig);
 }
 
 // Re-export the helpers for tests that prefer to exercise intermediate steps.
