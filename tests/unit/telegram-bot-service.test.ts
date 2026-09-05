@@ -273,7 +273,7 @@ describe("TelegramBotService callback-action dispatch", () => {
         `INSERT INTO term_deposit_reminders (deposit_id, offset_kind, target_date)
          VALUES (?, ?, ?) RETURNING id`
       )
-      .bind(depositId, "D_7", "2026-03-25")
+      .bind(depositId, "D_MINUS_7", "2026-03-25")
       .first<{ id: number }>();
     expect(reminderRow).not.toBeNull();
     if (reminderRow === null) return;
@@ -292,7 +292,7 @@ describe("TelegramBotService callback-action dispatch", () => {
     expect(sent.text).toContain(`Term deposit #${depositId}`);
     expect(sent.text).toContain("PHP");
     expect(sent.text).toContain("Maturity: 2026-04-01");
-    expect(sent.text).toContain("D_7");
+    expect(sent.text).toContain("D_MINUS_7");
   });
 
   it("mute action mutes all pending reminders for the deposit and confirms", async () => {
