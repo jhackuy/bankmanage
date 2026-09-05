@@ -137,8 +137,9 @@ export class TermDepositReminderService {
 
   /**
    * Mute a reminder. Delivery-only effect; the underlying deposit state
-   * is NOT touched. Returns a typed failure if the id does not exist or
-   * the reminder is no longer in PENDING.
+   * is NOT touched. The "Mute future" button suppresses ALL remaining
+   * Telegram messages for the deposit, not just the targeted reminder.
+   * Returns a typed failure if the id does not exist.
    */
   async mute(reminderId: number): Promise<ServiceResult<ReminderRecord>> {
     if (!Number.isSafeInteger(reminderId) || reminderId <= 0) {
@@ -148,8 +149,9 @@ export class TermDepositReminderService {
     if (record === null) {
       return fail("NOT_FOUND", `reminder ${reminderId} not found`);
     }
-    const updated = await this.reminderRepo.markMuted(reminderId);
-    if (updated === null) {
+    await this.reminderRepo.markMutedForDeposit(record.depositId);
+    const updated = await this.reminderRepo.findById(reminderId);
+    if (updated === null || updated.status !== "MUTED") {
       return fail(
         "ILLEGAL_TRANSITION",
         `reminder ${reminderId} cannot be muted from status ${record.status}`

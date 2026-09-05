@@ -8,3 +8,8 @@ export {
   FAKE_MEMBER_USER_ID,
 } from "./fake.js";
 export type { TelegramAdapter, TelegramIdentity, MemberRole, SendMessageOptions } from "./interface.js";
+export {
+  CloudflareTelegramAdapter,
+  TelegramTransportError,
+  type CloudflareTelegramAdapterOptions,
+} from "./cloudflare-http.js";
