@@ -1112,3 +1112,232 @@ describe("confirmReceipt — claim/release concurrency", () => {
     expect(second.value.transactionId).toBe(originalTx?.id);
   });
 });
+
+// ── claim-token protocol: interleaving tests ─────────────────────────────────
+//
+// These tests exercise the claim-token protocol directly against the
+// repository to prove the two races called out by the review comment are
+// closed:
+//   Race 1 — a claimed confirmation must atomically block
+//            rejectSession / updateCorrectedPayload.
+//   Race 2 — a failed same-key caller must not clear the claim slot
+//            underneath another in-flight same-key caller (releaseClaim
+//            with a stale or foreign token is a no-op).
+//   Race 3 — a third-key duplicate (two different keys + one same-key
+//            retry) cannot both finalize with a transaction row.
+
+describe("review_sessions — claim-token protocol interleaving", () => {
+  it("rejectSession is blocked while a confirmation claim is held (no orphan REJECTED session)", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "reject-blocked");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const sessionId = submit.value.session.id;
+
+    // Reserve the claim directly via the repository: this simulates a
+    // caller that is mid-flight on confirmReceipt (the claim UPDATE has
+    // run, the transaction INSERT has not yet).
+    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key");
+    expect(claim.code).toBe("CLAIMED");
+
+    // reject() must NOT succeed: the session still has a held claim slot.
+    const rej = await reviewService.reject({ sessionId, memberId: seed.ownerId, reason: "too late" });
+    expect(rej.ok).toBe(false);
+    if (rej.ok) return;
+    expect(rej.error.code).toBe("SESSION_NOT_PENDING");
+
+    // The session is still PENDING_REVIEW — no orphan REJECTED row.
+    const persisted = await db
+      .prepare("SELECT status, post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ status: string; post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(persisted?.status).toBe("PENDING_REVIEW");
+    expect(persisted?.post_idempotency_key).toBe("in-flight-key");
+    expect(persisted?.claim_token).not.toBeNull();
+    expect(await countTransactions()).toBe(0);
+  });
+
+  it("updateCorrectedPayload is blocked while a confirmation claim is held", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "correct-blocked");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const sessionId = submit.value.session.id;
+    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key-correct");
+    expect(claim.code).toBe("CLAIMED");
+
+    // correctFields must NOT succeed while a claim is held.
+    const corr = await reviewService.correctFields({
+      sessionId,
+      memberId: seed.ownerId,
+      patches: { totalAmountCandidate: "1.00" },
+    });
+    expect(corr.ok).toBe(false);
+    if (corr.ok) return;
+    expect(corr.error.code).toBe("SESSION_NOT_PENDING");
+
+    const persisted = await db
+      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(persisted?.post_idempotency_key).toBe("in-flight-key-correct");
+    expect(persisted?.claim_token).not.toBeNull();
+  });
+
+  it("releaseClaim with a wrong token is a no-op (no clobber underneath another caller)", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "release-noop");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const sessionId = submit.value.session.id;
+    const claim = await reviewRepo.claimSession(sessionId, "held-key");
+    expect(claim.code).toBe("CLAIMED");
+    if (claim.code !== "CLAIMED") return;
+    const legitToken = claim.claimToken;
+
+    // A foreign caller (or a stale same-key retry that does not own the
+    // token) attempts to release with the WRONG token. The slot must
+    // remain held.
+    await reviewRepo.releaseClaim(sessionId, "held-key", "definitely-not-the-token");
+
+    const persisted = await db
+      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(persisted?.post_idempotency_key).toBe("held-key");
+    expect(persisted?.claim_token).toBe(legitToken);
+
+    // The legit owner of the token can release — that DOES clear the
+    // slot, confirming the protocol is sound.
+    await reviewRepo.releaseClaim(sessionId, "held-key", legitToken);
+    const cleared = await db
+      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(cleared?.post_idempotency_key).toBeNull();
+    expect(cleared?.claim_token).toBeNull();
+  });
+
+  it("a third-key caller cannot finalize while the original claimer holds a different key", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "third-key-blocked");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const sessionId = submit.value.session.id;
+    const original = await reviewRepo.claimSession(sessionId, "key-X");
+    expect(original.code).toBe("CLAIMED");
+
+    // A different-key caller attempts to claim — must be rejected.
+    const third = await reviewRepo.claimSession(sessionId, "key-Y");
+    expect(third.code).toBe("ALREADY_CLAIMED_DIFFERENT_KEY");
+
+    // A same-key retry sees ALREADY_CLAIMED_SAME_KEY (admitted) but is
+    // NOT issued a token: the retry is read-only on the slot.
+    const sameKeyRetry = await reviewRepo.claimSession(sessionId, "key-X");
+    expect(sameKeyRetry.code).toBe("ALREADY_CLAIMED_SAME_KEY");
+
+    // No transaction rows have been produced — only the original claimer
+    // could possibly post.
+    expect(await countTransactions()).toBe(0);
+  });
+
+  it("a same-key retry after a forced post failure does not release the slot and recovers cleanly", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "same-key-no-release");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+
+    const sessionId = submit.value.session.id;
+    const sharedKey = "retry-key-protocol";
+
+    // Inject a post failure on the FIRST call only.
+    let postCalls = 0;
+    const flakyTxService = new Proxy(txService, {
+      get(target, prop, receiver) {
+        if (prop === "postIncomeExpense") {
+          return async (...args: unknown[]) => {
+            postCalls += 1;
+            if (postCalls === 1) {
+              throw new Error("forced post failure #1");
+            }
+            return (target.postIncomeExpense as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const flakyService = new ReviewApplicationService(
+      reviewRepo,
+      docService,
+      flakyTxService as unknown as TransactionApplicationService,
+      accountRepo,
+      categoryRepo
+    );
+
+    await expect(
+      flakyService.confirmReceipt(confirmInput(sessionId, seed.ownerId, { idempotencyKey: sharedKey }))
+    ).rejects.toThrow("forced post failure #1");
+
+    // The first caller was a fresh CLAIMED — but its post THREW, so the
+    // service's release path did NOT run (the throw propagated before
+    // the ok-check). The slot must remain held by the same-key caller.
+    const afterThrow = await db
+      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(afterThrow?.post_idempotency_key).toBe(sharedKey);
+    expect(afterThrow?.claim_token).not.toBeNull();
+
+    // Retry with the SAME key — claim returns ALREADY_CLAIMED_SAME_KEY
+    // (no fresh token), the retry proceeds to the post step without
+    // owning a release token. Post succeeds on attempt #2 and the
+    // session moves to CONFIRMED.
+    const retry = await flakyService.confirmReceipt(
+      confirmInput(sessionId, seed.ownerId, { idempotencyKey: sharedKey })
+    );
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+
+    expect(await countTransactions()).toBe(1);
+    const persisted = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string | null;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+      }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe(sharedKey);
+    // confirmSession clears claim_token on finalize.
+    expect(persisted?.claim_token).toBeNull();
+    expect(persisted?.linked_transaction_id).toBe(retry.value.transactionId);
+  });
+});

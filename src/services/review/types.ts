@@ -58,6 +58,7 @@ export interface ReviewSessionRecord {
   readonly correctedPayload: Readonly<Record<string, string>>;
   readonly confirmedPayload: Readonly<Record<string, unknown>> | null;
   readonly postIdempotencyKey: string | null;
+  readonly claimToken: string | null;
   readonly linkedTransactionId: number | null;
   readonly reason: string | null;
   readonly createdAt: string;

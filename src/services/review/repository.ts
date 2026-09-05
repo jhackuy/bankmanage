@@ -41,16 +41,24 @@ export interface ConfirmSessionResult {
  * Discriminated union returned by `claimSession`. Describes the outcome
  * of attempting to reserve the session's `post_idempotency_key` slot
  * BEFORE the financial write. The service uses this to:
- *   - admit the caller to the post step (CLAIMED);
- *   - admit a same-key retry to the post step (ALREADY_CLAIMED_SAME_KEY);
+ *   - admit the caller to the post step (CLAIMED) and learn the claim
+ *     token that authorizes a later releaseClaim;
+ *   - admit a same-key retry to the post step (ALREADY_CLAIMED_SAME_KEY)
+ *     and learn the existing claim token (read-only — the retry does
+ *     NOT own the token and must NOT call releaseClaim);
  *   - reject a different-key caller before any financial write
  *     (ALREADY_CLAIMED_DIFFERENT_KEY);
  *   - surface stale-state and kind-mismatch errors before any write
  *     (NOT_PENDING / KIND_MISMATCH / NOT_FOUND).
+ *
+ * The claim-token protocol (CLAIMED + token) is what prevents a failed
+ * same-key caller from clearing the slot underneath another in-flight
+ * same-key caller: only the caller that received the token can call
+ * releaseClaim.
  */
 export type ClaimSessionResult =
-  | { readonly code: "CLAIMED" }
-  | { readonly code: "ALREADY_CLAIMED_SAME_KEY" }
+  | { readonly code: "CLAIMED"; readonly claimToken: string }
+  | { readonly code: "ALREADY_CLAIMED_SAME_KEY"; readonly claimToken: string }
   | { readonly code: "ALREADY_CLAIMED_DIFFERENT_KEY" }
   | { readonly code: "NOT_PENDING" }
   | { readonly code: "KIND_MISMATCH" }
@@ -125,11 +133,19 @@ export interface ReviewSessionRepository {
    * CURRENCY_MISMATCH) so the caller can retry with corrected inputs
    * without bumping into the same claim slot.
    *
+   * Requires the `claimToken` returned by the CLAIMED branch of
+   * `claimSession`. This is the token protocol boundary that prevents
+   * a failed same-key caller from clearing a claim that another
+   * in-flight same-key caller is operating on: only the caller that
+   * was issued the token (the original claimer) can release the slot.
+   * A same-key retry sees ALREADY_CLAIMED_SAME_KEY and is NOT issued
+   * a new token; that retry must NOT call releaseClaim.
+   *
    * Refuses to clear the slot if the session is no longer
    * PENDING_REVIEW — once CONFIRMED or REJECTED the session is terminal
    * and the claim must not be reset.
    */
-  releaseClaim(id: number, postIdempotencyKey: string): Promise<void>;
+  releaseClaim(id: number, postIdempotencyKey: string, claimToken: string): Promise<void>;
 
   /**
    * Move a PENDING_REVIEW session to REJECTED with an optional reason.

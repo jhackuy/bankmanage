@@ -43,6 +43,7 @@ interface ReviewSessionRow {
   corrected_payload_json: string;
   confirmed_payload_json: string | null;
   post_idempotency_key: string | null;
+  claim_token: string | null;
   linked_transaction_id: number | null;
   reason: string | null;
   created_at: string;
@@ -72,6 +73,7 @@ function rowToSession(row: ReviewSessionRow): ReviewSessionRecord {
         ? null
         : jsonParse<Record<string, unknown>>(row.confirmed_payload_json),
     postIdempotencyKey: row.post_idempotency_key,
+    claimToken: row.claim_token,
     linkedTransactionId: row.linked_transaction_id,
     reason: row.reason,
     createdAt: row.created_at,
@@ -129,7 +131,9 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     expectedStatus: ReviewStatus
   ): Promise<ReviewSessionRecord> {
     // Read-modify-write on the JSON column. The optimistic WHERE-status
-    // lock guards against a concurrent confirm/reject racing us.
+    // lock guards against a concurrent confirm/reject racing us. The
+    // `post_idempotency_key IS NULL` guard blocks correct() while a
+    // confirmation is mid-flight — claim-protected.
     const existing = await this.findById(id);
     if (existing === null) {
       throw new Error("session not found");
@@ -137,12 +141,15 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     if (existing.status !== expectedStatus) {
       throw new Error(`stale state during corrected-payload update: ${existing.status}`);
     }
+    if (existing.postIdempotencyKey !== null) {
+      throw new Error("session is mid-confirmation; cannot correct fields");
+    }
     const merged: Record<string, string> = { ...existing.correctedPayload, ...patches };
     const stmt = this.db
       .prepare(
         `UPDATE review_sessions
            SET corrected_payload_json = ?, updated_at = datetime('now', 'utc')
-         WHERE id = ? AND status = ?
+         WHERE id = ? AND status = ? AND post_idempotency_key IS NULL
          RETURNING *`
       )
       .bind(JSON.stringify(merged), id, expectedStatus);
@@ -163,9 +170,14 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
 
     // Same-key retry: slot already holds our key from a prior
     // mid-write crash. The post step's idempotency_key UNIQUE keeps
-    // the retry a no-op at the financial layer.
+    // the retry a no-op at the financial layer. The retry is admitted
+    // to the post step, but it does NOT own the claim token — only
+    // the original claimer can call releaseClaim.
     if (existing.postIdempotencyKey === postIdempotencyKey) {
-      return { code: "ALREADY_CLAIMED_SAME_KEY" };
+      if (existing.claimToken === null) {
+        throw new Error("claim slot held without token");
+      }
+      return { code: "ALREADY_CLAIMED_SAME_KEY", claimToken: existing.claimToken };
     }
     // Different-key conflict: another caller is mid-flight with a
     // distinct idempotency key. Reject before any financial write.
@@ -174,23 +186,29 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     }
 
     // Step 2: slot is NULL — attempt the atomic claim with optimistic
-    // lock on (status, kind, slot IS NULL). A concurrent caller could
-    // have claimed the slot between our SELECT and UPDATE; the WHERE
-    // clause guards against that race.
+    // lock on (status, kind, slot IS NULL). Generate a UUID token
+    // that authorizes the matching releaseClaim. A concurrent caller
+    // could have claimed the slot between our SELECT and UPDATE; the
+    // WHERE clause guards against that race and the UPDATE returns
+    // the persisted token on success.
+    const claimToken = crypto.randomUUID();
     const row = await this.db
       .prepare(
         `UPDATE review_sessions
            SET post_idempotency_key = ?,
+               claim_token = ?,
                updated_at = datetime('now', 'utc')
          WHERE id = ?
            AND status = 'PENDING_REVIEW'
            AND kind = 'RECEIPT'
            AND post_idempotency_key IS NULL
-         RETURNING id`
+         RETURNING claim_token`
       )
-      .bind(postIdempotencyKey, id)
-      .first<{ id: number }>();
-    if (row !== null) return { code: "CLAIMED" };
+      .bind(postIdempotencyKey, claimToken, id)
+      .first<{ claim_token: string }>();
+    if (row !== null && row.claim_token !== null) {
+      return { code: "CLAIMED", claimToken: row.claim_token };
+    }
 
     // Lost the race to a concurrent claim. Re-check to map to a
     // precise outcome.
@@ -199,26 +217,36 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     if (recheck.status !== "PENDING_REVIEW") return { code: "NOT_PENDING" };
     if (recheck.kind !== "RECEIPT") return { code: "KIND_MISMATCH" };
     if (recheck.postIdempotencyKey === postIdempotencyKey) {
-      return { code: "ALREADY_CLAIMED_SAME_KEY" };
+      if (recheck.claimToken === null) {
+        throw new Error("claim slot held without token");
+      }
+      return { code: "ALREADY_CLAIMED_SAME_KEY", claimToken: recheck.claimToken };
     }
     return { code: "ALREADY_CLAIMED_DIFFERENT_KEY" };
   }
 
-  async releaseClaim(id: number, postIdempotencyKey: string): Promise<void> {
-    // Only release when the session is still PENDING_REVIEW AND the
-    // slot currently holds the key we are trying to clear. This
-    // prevents a concurrent confirm/reject from clobbering a terminal
-    // state and prevents clearing a slot a different caller holds.
+  async releaseClaim(id: number, postIdempotencyKey: string, claimToken: string): Promise<void> {
+    // Token-protocol boundary: only release when the session is still
+    // PENDING_REVIEW AND the slot currently holds the key we are
+    // trying to clear AND the stored claim_token matches the token we
+    // were issued. This prevents:
+    //   - a concurrent confirm/reject from clobbering a terminal state;
+    //   - a different-key caller from clearing a slot it doesn't own;
+    //   - a failed same-key caller from clearing the slot underneath
+    //     another in-flight same-key caller (only the original
+    //     claimer holds the token).
     await this.db
       .prepare(
         `UPDATE review_sessions
            SET post_idempotency_key = NULL,
+               claim_token = NULL,
                updated_at = datetime('now', 'utc')
          WHERE id = ?
            AND status = 'PENDING_REVIEW'
-           AND post_idempotency_key = ?`
+           AND post_idempotency_key = ?
+           AND claim_token = ?`
       )
-      .bind(id, postIdempotencyKey)
+      .bind(id, postIdempotencyKey, claimToken)
       .run();
   }
 
@@ -235,6 +263,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
            SET status = 'CONFIRMED',
                confirmed_payload_json = ?,
                post_idempotency_key = ?,
+               claim_token = NULL,
                linked_transaction_id = ?,
                updated_at = datetime('now', 'utc')
          WHERE id = ? AND status = ? AND kind = ?
@@ -289,13 +318,15 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     reason: string | null,
     expectedStatus: ReviewStatus
   ): Promise<ConfirmSessionResult> {
+    // The `post_idempotency_key IS NULL` guard blocks reject() while
+    // a confirmation is mid-flight — claim-protected.
     const stmt = this.db
       .prepare(
         `UPDATE review_sessions
            SET status = 'REJECTED',
                reason = ?,
                updated_at = datetime('now', 'utc')
-         WHERE id = ? AND status = ?
+         WHERE id = ? AND status = ? AND post_idempotency_key IS NULL
          RETURNING *`
       )
       .bind(reason, id, expectedStatus);
@@ -304,6 +335,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
       const existing = await this.findById(id);
       if (existing === null) throw new Error("SESSION_NOT_FOUND");
       if (existing.status !== expectedStatus) throw new Error("SESSION_NOT_PENDING");
+      if (existing.postIdempotencyKey !== null) throw new Error("SESSION_CLAIMED");
       throw new Error("STALE_STATE");
     }
     return { session: rowToSession(row), created: true };

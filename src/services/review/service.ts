@@ -203,6 +203,9 @@ export class ReviewApplicationService {
       if (err instanceof Error && /stale state/i.test(err.message)) {
         return fail("SESSION_NOT_PENDING", `session ${input.sessionId} is no longer PENDING_REVIEW`);
       }
+      if (err instanceof Error && /mid-confirmation/i.test(err.message)) {
+        return fail("SESSION_NOT_PENDING", `session ${input.sessionId} has a confirmation in progress`);
+      }
       throw err;
     }
   }
@@ -247,6 +250,9 @@ export class ReviewApplicationService {
         }
         if (/^SESSION_NOT_PENDING$/.test(err.message)) {
           return fail("SESSION_NOT_PENDING", `session ${input.sessionId} is no longer PENDING_REVIEW`);
+        }
+        if (/^SESSION_CLAIMED$/.test(err.message)) {
+          return fail("SESSION_NOT_PENDING", `session ${input.sessionId} has a confirmation in progress`);
         }
       }
       throw err;
@@ -320,10 +326,23 @@ export class ReviewApplicationService {
     // retry a no-op at the financial layer); a different-key caller is
     // rejected with SESSION_CLAIM_CONFLICT before any transaction is
     // posted.
+    //
+    // The claim returns a token that authorizes releaseClaim. Only the
+    // caller that received a fresh CLAIMED token owns the slot; a
+    // same-key retry is admitted to the post step but does NOT own the
+    // token and must NOT call releaseClaim (it would clobber the slot
+    // underneath the in-flight same-key caller).
     const claim = await this.reviewRepo.claimSession(input.sessionId, input.idempotencyKey);
+    let claimToken: string | null = null;
     switch (claim.code) {
       case "CLAIMED":
+        claimToken = claim.claimToken;
+        break;
       case "ALREADY_CLAIMED_SAME_KEY":
+        // Retry path: we are admitted to the post step but do NOT own
+        // the token. If the post fails we must NOT releaseClaim — that
+        // would clobber the slot underneath the in-flight caller that
+        // holds the token.
         break;
       case "ALREADY_CLAIMED_DIFFERENT_KEY":
         return fail(
@@ -354,12 +373,17 @@ export class ReviewApplicationService {
       ...(input.description !== undefined ? { description: input.description } : {}),
     });
     if (!postResult.ok) {
-      // Release the claim so the caller can retry. Best-effort: a
-      // release failure (e.g. session moved to a terminal state in the
-      // same window) leaves the slot held, which is the safe direction
-      // — the next caller's claim will return ALREADY_CLAIMED_SAME_KEY
-      // and proceed via the transactions UNIQUE.
-      await this.reviewRepo.releaseClaim(input.sessionId, input.idempotencyKey);
+      // Release the claim ONLY when we own the token (CLAIMED branch).
+      // Same-key retries do not own the token; releasing from a retry
+      // would clobber the slot underneath the in-flight same-key
+      // caller. Best-effort: a release failure (e.g. session moved to
+      // a terminal state in the same window) leaves the slot held,
+      // which is the safe direction — the next caller's claim will
+      // return ALREADY_CLAIMED_SAME_KEY and proceed via the
+      // transactions UNIQUE.
+      if (claimToken !== null) {
+        await this.reviewRepo.releaseClaim(input.sessionId, input.idempotencyKey, claimToken);
+      }
       return fail(mapTxPostError(postResult.error.code), postResult.error.message);
     }
 
