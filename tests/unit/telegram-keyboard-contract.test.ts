@@ -25,15 +25,35 @@ import { TermDepositReminderService } from "../../src/services/term-deposit/remi
 
 const CALLBACK_PATTERN = /^r:(\d+):([a-z_]+)$/;
 
-function collectCallbackData(markup: {
+type InlineKeyboardMarkup = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
-}): string[] {
+};
+
+/**
+ * Type-safe narrowing helper for the possibly null/unknown
+ * `SendMessageOptions["replyMarkup"]` produced by `defaultReminderKeyboard`.
+ *
+ * The production type is `unknown` (see `SendMessageOptions.replyMarkup`),
+ * so the test must narrow before enumerating `inline_keyboard`. If the
+ * runtime shape ever drifts from the expected keyboard, this helper
+ * throws via the `expect` assertions, keeping the contract honest.
+ */
+function assertReplyMarkup(markup: unknown): InlineKeyboardMarkup {
+  expect(markup).not.toBeNull();
+  expect(markup).not.toBeUndefined();
+  expect(typeof markup).toBe("object");
+  const obj = markup as Record<string, unknown>;
+  expect(Array.isArray(obj["inline_keyboard"])).toBe(true);
+  return obj as unknown as InlineKeyboardMarkup;
+}
+
+function collectCallbackData(markup: InlineKeyboardMarkup): string[] {
   return markup.inline_keyboard.flatMap((row) => row.map((button) => button.callback_data));
 }
 
 describe("reminder keyboard — callback contract", () => {
   it("the production keyboard advertises exactly the supported actions (OWNER role)", () => {
-    const markup = defaultReminderKeyboard({ reminderId: 1, depositId: 1, role: "OWNER" });
+    const markup = assertReplyMarkup(defaultReminderKeyboard({ reminderId: 1, depositId: 1, role: "OWNER" }));
     const dataValues = collectCallbackData(markup);
     expect(dataValues.length).toBeGreaterThan(0);
     for (const data of dataValues) {
@@ -45,7 +65,9 @@ describe("reminder keyboard — callback contract", () => {
   });
 
   it("the production keyboard advertises exactly the supported actions (MEMBER role)", () => {
-    const markup = defaultReminderKeyboard({ reminderId: 2, depositId: 2, role: "MEMBER" });
+    const markup = assertReplyMarkup(
+      defaultReminderKeyboard({ reminderId: 2, depositId: 2, role: "MEMBER" })
+    );
     const dataValues = collectCallbackData(markup);
     expect(dataValues.length).toBeGreaterThan(0);
     for (const data of dataValues) {
@@ -58,7 +80,7 @@ describe("reminder keyboard — callback contract", () => {
 
   it("every emitted callback_data is either 'view' or 'mute'", () => {
     for (const role of ["OWNER", "MEMBER"] as const) {
-      const markup = defaultReminderKeyboard({ reminderId: 3, depositId: 3, role });
+      const markup = assertReplyMarkup(defaultReminderKeyboard({ reminderId: 3, depositId: 3, role }));
       for (const data of collectCallbackData(markup)) {
         const action = CALLBACK_PATTERN.exec(data)![2]!;
         expect(["view", "mute"]).toContain(action);
@@ -68,10 +90,10 @@ describe("reminder keyboard — callback contract", () => {
 
   it("OWNER and MEMBER keyboards are identical (no role-gated buttons remain)", () => {
     const owner = collectCallbackData(
-      defaultReminderKeyboard({ reminderId: 4, depositId: 4, role: "OWNER" })
+      assertReplyMarkup(defaultReminderKeyboard({ reminderId: 4, depositId: 4, role: "OWNER" }))
     );
     const member = collectCallbackData(
-      defaultReminderKeyboard({ reminderId: 4, depositId: 4, role: "MEMBER" })
+      assertReplyMarkup(defaultReminderKeyboard({ reminderId: 4, depositId: 4, role: "MEMBER" }))
     );
     expect(new Set(owner)).toEqual(new Set(member));
   });
@@ -91,7 +113,7 @@ describe("reminder keyboard — callback contract", () => {
       });
 
       for (const role of ["OWNER", "MEMBER"] as const) {
-        const markup = defaultReminderKeyboard({ reminderId: 5, depositId: 5, role });
+        const markup = assertReplyMarkup(defaultReminderKeyboard({ reminderId: 5, depositId: 5, role }));
         for (const data of collectCallbackData(markup)) {
           adapter.clearMessages();
           // The reminder id does not need to exist in the DB for this
