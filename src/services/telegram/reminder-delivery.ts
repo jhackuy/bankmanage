@@ -154,16 +154,21 @@ export class TelegramReminderDeliveryService {
   }
 
   private async deliverOne(reminder: ReminderRecord): Promise<boolean> {
-    // Race-safe delivery claim: atomically transition PENDING +
-    // claimed_at IS NULL → PENDING + claimed_at = now. Two concurrent
-    // Cron invocations both calling this for the same id will see
-    // exactly one "true" and one "false"; the loser skips without
-    // touching the transport adapter.
-    const claimed = await this._reminders.claimForDelivery(reminder.id);
-    if (!claimed) {
-      // Another worker holds the claim (or the row is no longer
-      // PENDING). This is the SPEC §5 "duplicate logical delivery is
-      // impossible" boundary. Skip silently.
+    // Race-safe delivery claim with lease recovery + ownership token
+    // (migrations 0015 + 0016). claimForDelivery atomically transitions
+    // PENDING + (claimed_at IS NULL OR lease expired) → PENDING +
+    // claimed_at = now + claim_token = newToken. Two concurrent Cron
+    // invocations both calling this for the same id will see exactly
+    // one non-null claim and one null; the loser skips without touching
+    // the transport adapter. The returned token is required by
+    // markDelivered / releaseClaim to prove the caller still owns the
+    // claim, so a stale claimant cannot finalize or clear a
+    // replacement claim.
+    const claim = await this._reminders.claimForDelivery(reminder.id);
+    if (claim === null) {
+      // Another worker holds a non-expired claim (or the row is no
+      // longer PENDING). This is the SPEC §5 "duplicate logical
+      // delivery is impossible" boundary. Skip silently.
       return false;
     }
 
@@ -176,7 +181,7 @@ export class TelegramReminderDeliveryService {
         // CANCELLED or terminal). Release the claim so the next tick can
         // see whatever the current row state is; the row itself is
         // unchanged.
-        await this._reminders.releaseClaim(reminder.id);
+        await this._reminders.releaseClaim(reminder.id, claim.token);
         return false;
       }
       const holderId = deposit.holderMemberId;
@@ -189,7 +194,7 @@ export class TelegramReminderDeliveryService {
       // configured two-user allowlist.
       const identity = await this.findIdentityForMember(holderId);
       if (identity === null) {
-        await this._reminders.releaseClaim(reminder.id);
+        await this._reminders.releaseClaim(reminder.id, claim.token);
         return false;
       }
       const chatId = identity.telegramUserId;
@@ -204,26 +209,33 @@ export class TelegramReminderDeliveryService {
       if (result.messageId <= 0) {
         // Transport returned a non-positive messageId — treat as a
         // failure, release the claim so the next tick retries.
-        await this._reminders.releaseClaim(reminder.id);
+        await this._reminders.releaseClaim(reminder.id, claim.token);
         return false;
       }
       // Finalize DELIVERED only after the transport accepted the
       // message. markDelivered requires the row to still be PENDING and
-      // to still hold our claim; the combined guard makes a duplicate
-      // finalize impossible even if another worker raced us.
-      const updated = await this._reminders.markDelivered(reminder.id);
+      // its claim_token to match ours; the combined guard makes a
+      // duplicate finalize impossible even if another worker raced us
+      // (and prevents a slow claimant whose lease has been recovered
+      // from finalizing a replacement claim).
+      const updated = await this._reminders.markDelivered(reminder.id, claim.token);
       if (updated === null) {
-        // The row was concurrently muted or cancelled after our send.
-        // The message has already been accepted by Telegram; we do not
-        // retry and we do not roll back the deposit business state.
+        // The row was concurrently muted/cancelled after our send, or
+        // our lease was recovered before markDelivered ran. The message
+        // has already been accepted by Telegram; we do not retry and we
+        // do not roll back the deposit business state.
         return true;
       }
       return true;
     } catch (err) {
       // Transport or DB failure: release the claim so the next cron
       // tick retries. The row stays PENDING (SPEC §5 safely-retryable
-      // boundary) and the deposit row is NEVER mutated from this service.
-      await this._reminders.releaseClaim(reminder.id);
+      // boundary) and the deposit row is NEVER mutated from this
+      // service. Passing our token ensures we only release our own
+      // claim — if the lease has already been recovered by another
+      // worker, releaseClaim affects 0 rows and the replacement claim
+      // is left intact.
+      await this._reminders.releaseClaim(reminder.id, claim.token);
       throw err;
     }
   }

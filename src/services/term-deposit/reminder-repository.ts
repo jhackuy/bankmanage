@@ -33,6 +33,18 @@ export interface EnsureReminderResult {
   readonly created: boolean;
 }
 
+/**
+ * Opaque lease handle returned by `claimForDelivery`. The caller MUST pass
+ * `token` back to `markDelivered` or `releaseClaim` to prove it is still
+ * the current claimant. Two concurrent cron ticks that both call
+ * `claimForDelivery` for the same reminder id will see exactly one
+ * non-null handle; the other receives `null` and skips.
+ */
+export interface ReminderClaim {
+  readonly id: number;
+  readonly token: string;
+}
+
 export interface ReminderRepository {
   /**
    * Idempotently ensure a reminder row exists for (depositId, offsetKind)
@@ -72,40 +84,53 @@ export interface ReminderRepository {
 
   /**
    * Atomically claim a PENDING reminder for outbound Telegram delivery.
-   * Returns true if this caller is the one that observed the claim
-   * transition (changes=1), false if another worker already holds the
-   * claim or the row is no longer PENDING.
+   * Returns a `ReminderClaim` (with the opaque ownership token) if this
+   * caller observed the claim transition (changes=1), or `null` if
+   * another worker holds a non-expired claim or the row is no longer
+   * PENDING.
    *
    * Race-safe boundary (SPEC §5 "scheduler must be idempotent"): two
    * concurrent Cron invocations that both call claimForDelivery for the
-   * same reminder id will see exactly one `true` and one `false`, so
-   * duplicate logical delivery is impossible even under overlapping
-   * isolates. The caller MUST release the claim (releaseClaim) on a
-   * definite transport failure so the next tick can retry; final
-   * delivery (markDelivered) must succeed within the same window.
+   * same reminder id will see exactly one non-null handle and one `null`,
+   * so duplicate logical delivery is impossible even under overlapping
+   * isolates.
+   *
+   * Lease recovery (migration 0016): if the previous claim's lease has
+   * expired (a Worker crashed or was terminated before releasing), the
+   * row becomes claimable again and the new caller receives a fresh
+   * token. The token returned here is required by `markDelivered` and
+   * `releaseClaim`, so an old claimant cannot finalize or clear a
+   * replacement claim.
+   *
+   * The caller MUST release the claim (releaseClaim) on a definite
+   * transport failure so the next tick can retry; final delivery
+   * (markDelivered) must succeed within the same lease window.
    */
-  claimForDelivery(id: number): Promise<boolean>;
+  claimForDelivery(id: number): Promise<ReminderClaim | null>;
 
   /**
    * Release an outstanding delivery claim so the next cron tick can retry.
-   * Only clears `claimed_at`; does NOT change status. Safe to call after a
-   * transport failure. Returns true if a claim was released, false if the
-   * row had no claim to release.
+   * Requires the matching `token` from `claimForDelivery`: only the
+   * current claimant can clear the claim. Does NOT change status. Safe
+   * to call after a transport failure. Returns true if a claim was
+   * released, false if the row had no claim to release or the token did
+   * not match (stale or wrong owner).
    */
-  releaseClaim(id: number): Promise<boolean>;
+  releaseClaim(id: number, token: string): Promise<boolean>;
 
   /**
    * Mark a reminder as DELIVERED. The D1 repository persists the status
-   * transition only if the row is still PENDING and has an outstanding
-   * delivery claim (claimed_at IS NOT NULL) — that is the SPEC §5
+   * transition only if the row is still PENDING and the supplied `token`
+   * matches the current `claim_token` — that is the SPEC §5
    * "finalize DELIVERED only after accepted send" boundary.
    *
    * Returns the updated record, or `null` if the row was concurrently
-   * muted/cancelled or no longer held a claim. A null result means the
-   * transport message has already been accepted (the row state moved
-   * elsewhere); callers do not retry.
+   * muted/cancelled or the token no longer matches (stale owner whose
+   * lease has since been recovered). A null result means the caller
+   * does not own the current claim; the transport message has already
+   * been accepted (or rejected) by the current claimant.
    */
-  markDelivered(id: number): Promise<ReminderRecord | null>;
+  markDelivered(id: number, token: string): Promise<ReminderRecord | null>;
 
   /**
    * Cancel all PENDING/MUTED reminders for a deposit. Returns the number

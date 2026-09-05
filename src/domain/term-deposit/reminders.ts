@@ -43,11 +43,13 @@ export const REMINDER_STATUSES: readonly ReminderStatus[] = ["PENDING", "MUTED",
  * constraint on that pair is the idempotency boundary enforced by the D1
  * repository layer.
  *
- * `claimedAt` is the atomic delivery-claim boundary added in migration 0015.
- * It is set by `claimForDelivery` before the outbound Telegram transport
- * and cleared by `releaseClaim` on a definite send failure. Only a row with
- * `claimedAt !== null` can be transitioned to DELIVERED, so two concurrent
- * Cron invocations cannot both finalize the same logical delivery.
+ * `claimedAt` and `claimToken` together form the lease-based delivery-claim
+ * boundary added in migrations 0015 and 0016. `claimForDelivery` sets both
+ * atomically and returns the opaque token to the caller; `markDelivered`
+ * and `releaseClaim` require the same token to take effect. A row whose
+ * lease has expired (claimed_at is older than the lease timeout) can be
+ * re-claimed by a later cron tick, but only the current claimant's token
+ * can finalize or clear the row.
  */
 export interface ReminderRecord {
   readonly id: number;
@@ -59,6 +61,7 @@ export interface ReminderRecord {
   readonly deliveredAt: string | null;
   readonly cancelledAt: string | null;
   readonly claimedAt: string | null;
+  readonly claimToken: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

@@ -511,3 +511,214 @@ describe("utcTodayDate", () => {
     expect(result).toBe("2026-01-01");
   });
 });
+
+// ── claim lifecycle token (lease + ownership) ────────────────────────────
+//
+// Migrations 0015 + 0016 introduce a lease-with-ownership-token delivery
+// claim. These tests prove the security invariants directly at the
+// repository boundary so the cron handler tests above can rely on them.
+
+describe("cron handler — claim lifecycle token (lease + ownership)", () => {
+  async function seedPendingReminder(): Promise<number> {
+    const depositId = await createActiveDeposit();
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    if (!scan.ok) throw new Error("scan failed");
+    const dueRow = await db
+      .prepare("SELECT id FROM term_deposit_reminders WHERE deposit_id = ? AND target_date = ?")
+      .bind(depositId, TODAY)
+      .first<{ id: number }>();
+    expect(dueRow).not.toBeNull();
+    if (dueRow === null) throw new Error("no due reminder");
+    return dueRow.id;
+  }
+
+  it("a fresh claim cannot be stolen by a concurrent caller", async () => {
+    const repo = new D1ReminderRepository(db);
+    const reminderId = await seedPendingReminder();
+
+    const first = await repo.claimForDelivery(reminderId);
+    expect(first).not.toBeNull();
+    if (first === null) return;
+
+    // Second concurrent caller must see null — the row's claimed_at is
+    // fresh (now), so the WHERE clause does not match.
+    const second = await repo.claimForDelivery(reminderId);
+    expect(second).toBeNull();
+
+    // Row state: still PENDING + claimed_at + claim_token.
+    const row = await db
+      .prepare("SELECT status, claimed_at, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ status: string; claimed_at: string | null; claim_token: string | null }>();
+    expect(row?.status).toBe("PENDING");
+    expect(row?.claimed_at).not.toBeNull();
+    expect(row?.claim_token).toBe(first.token);
+  });
+
+  it("an expired claim is recovered by a later worker with a fresh token", async () => {
+    const repo = new D1ReminderRepository(db);
+    const reminderId = await seedPendingReminder();
+
+    const first = await repo.claimForDelivery(reminderId);
+    expect(first).not.toBeNull();
+    if (first === null) return;
+
+    // Simulate a crashed Worker: rewind claimed_at beyond the lease
+    // timeout (90 s). The row's status stays PENDING.
+    await db
+      .prepare(
+        "UPDATE term_deposit_reminders SET claimed_at = datetime('now', '-120 seconds', 'utc') WHERE id = ?"
+      )
+      .bind(reminderId)
+      .run();
+
+    // The lease is now stale. A new worker must reclaim with a NEW
+    // token (not the crashed worker's).
+    const recovered = await repo.claimForDelivery(reminderId);
+    expect(recovered).not.toBeNull();
+    if (recovered === null) return;
+    expect(recovered.token).not.toBe(first.token);
+    expect(recovered.token).toMatch(/^[0-9a-f]{32}$/);
+
+    // Old worker is still holding its (now-stale) token. It must NOT
+    // be able to finalize or release the replacement claim.
+    const staleFinalize = await repo.markDelivered(reminderId, first.token);
+    expect(staleFinalize).toBeNull();
+
+    const rowAfterStale = await db
+      .prepare("SELECT status FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ status: string }>();
+    expect(rowAfterStale?.status).toBe("PENDING");
+
+    const staleRelease = await repo.releaseClaim(reminderId, first.token);
+    expect(staleRelease).toBe(false);
+
+    // The current claimant (recovered) still owns the claim and can
+    // finalize it normally.
+    const finalize = await repo.markDelivered(reminderId, recovered.token);
+    expect(finalize).not.toBeNull();
+    if (finalize === null) return;
+    expect(finalize.status).toBe("DELIVERED");
+  });
+
+  it("a stale owner cannot finalize a replacement claim (ABA race)", async () => {
+    const repo = new D1ReminderRepository(db);
+    const reminderId = await seedPendingReminder();
+
+    const first = await repo.claimForDelivery(reminderId);
+    expect(first).not.toBeNull();
+    if (first === null) return;
+
+    // Expire the first claim and let a second worker reclaim.
+    await db
+      .prepare(
+        "UPDATE term_deposit_reminders SET claimed_at = datetime('now', '-120 seconds', 'utc') WHERE id = ?"
+      )
+      .bind(reminderId)
+      .run();
+    const second = await repo.claimForDelivery(reminderId);
+    expect(second).not.toBeNull();
+    if (second === null) return;
+    expect(second.token).not.toBe(first.token);
+
+    // The original slow worker tries to markDelivered with its stale
+    // token. The WHERE clause requires `claim_token = ?`, so the stale
+    // token no longer matches and the UPDATE affects 0 rows.
+    const staleFinalize = await repo.markDelivered(reminderId, first.token);
+    expect(staleFinalize).toBeNull();
+
+    // Row status is still PENDING — the replacement claim is intact.
+    const row = await db
+      .prepare("SELECT status, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ status: string; claim_token: string | null }>();
+    expect(row?.status).toBe("PENDING");
+    expect(row?.claim_token).toBe(second.token);
+
+    // The replacement claimant can finalize with its own token.
+    const ok = await repo.markDelivered(reminderId, second.token);
+    expect(ok).not.toBeNull();
+    if (ok === null) return;
+    expect(ok.status).toBe("DELIVERED");
+  });
+
+  it("a stale owner cannot release a replacement claim", async () => {
+    const repo = new D1ReminderRepository(db);
+    const reminderId = await seedPendingReminder();
+
+    const first = await repo.claimForDelivery(reminderId);
+    expect(first).not.toBeNull();
+    if (first === null) return;
+
+    // Expire the first claim and let a second worker reclaim.
+    await db
+      .prepare(
+        "UPDATE term_deposit_reminders SET claimed_at = datetime('now', '-120 seconds', 'utc') WHERE id = ?"
+      )
+      .bind(reminderId)
+      .run();
+    const second = await repo.claimForDelivery(reminderId);
+    expect(second).not.toBeNull();
+    if (second === null) return;
+
+    // The original slow worker tries to release with its stale token.
+    // The WHERE clause requires `claim_token = ?`, so the release
+    // affects 0 rows and the replacement claim stays in place.
+    const staleRelease = await repo.releaseClaim(reminderId, first.token);
+    expect(staleRelease).toBe(false);
+
+    // Row still holds the replacement claim.
+    const row = await db
+      .prepare("SELECT status, claimed_at, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ status: string; claimed_at: string | null; claim_token: string | null }>();
+    expect(row?.status).toBe("PENDING");
+    expect(row?.claimed_at).not.toBeNull();
+    expect(row?.claim_token).toBe(second.token);
+
+    // The replacement claimant can release its own claim normally.
+    const ok = await repo.releaseClaim(reminderId, second.token);
+    expect(ok).toBe(true);
+
+    const after = await db
+      .prepare("SELECT status, claimed_at, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ status: string; claimed_at: string | null; claim_token: string | null }>();
+    expect(after?.status).toBe("PENDING");
+    expect(after?.claimed_at).toBeNull();
+    expect(after?.claim_token).toBeNull();
+  });
+
+  it("releaseClaim only clears the caller's own claim", async () => {
+    const repo = new D1ReminderRepository(db);
+    const reminderId = await seedPendingReminder();
+
+    const claim = await repo.claimForDelivery(reminderId);
+    expect(claim).not.toBeNull();
+    if (claim === null) return;
+
+    // A wrong token must not release the claim.
+    const wrong = await repo.releaseClaim(reminderId, "deadbeef".repeat(4));
+    expect(wrong).toBe(false);
+
+    const rowAfterWrong = await db
+      .prepare("SELECT claimed_at, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ claimed_at: string | null; claim_token: string | null }>();
+    expect(rowAfterWrong?.claimed_at).not.toBeNull();
+    expect(rowAfterWrong?.claim_token).toBe(claim.token);
+
+    // The legitimate caller releases its own claim.
+    const ok = await repo.releaseClaim(reminderId, claim.token);
+    expect(ok).toBe(true);
+
+    const rowAfter = await db
+      .prepare("SELECT claimed_at, claim_token FROM term_deposit_reminders WHERE id = ?")
+      .bind(reminderId)
+      .first<{ claimed_at: string | null; claim_token: string | null }>();
+    expect(rowAfter?.claimed_at).toBeNull();
+    expect(rowAfter?.claim_token).toBeNull();
+  });
+});
