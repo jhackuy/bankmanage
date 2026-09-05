@@ -284,6 +284,16 @@ function confirmInput(
   };
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor: predicate never satisfied within timeout");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 // ── submitForReview ──────────────────────────────────────────────────────────
 
 describe("submitForReview — happy path", () => {
@@ -959,7 +969,7 @@ describe("confirmReceipt — claim/release concurrency", () => {
     expect(persisted?.post_idempotency_key).toBe(winnerKey);
   });
 
-  it("a non-idempotent post failure releases the claim so a corrected retry can proceed", async () => {
+  it("a non-idempotent post failure retains the claim and the same key can retry to recover", async () => {
     const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-release-retry");
     const submit = await reviewService.submitForReview({
       documentId,
@@ -971,8 +981,9 @@ describe("confirmReceipt — claim/release concurrency", () => {
 
     // First confirm attempt uses the inactive account — the
     // transactions service returns ACCOUNT_INACTIVE (a non-idempotent
-    // failure), which the review service must translate and then
-    // release the claim so the corrected retry can proceed.
+    // failure), which the review service must translate. The claim is
+    // intentionally retained across the failure so no other key can
+    // interleave while the same-key retry is in flight.
     const first = await reviewService.confirmReceipt(
       confirmInput(submit.value.session.id, seed.ownerId, {
         accountId: seed.inactiveAccountId,
@@ -984,20 +995,32 @@ describe("confirmReceipt — claim/release concurrency", () => {
     expect(first.error.code).toBe("ACCOUNT_INACTIVE");
 
     // The session must still be PENDING_REVIEW and the claim slot
-    // cleared so the next caller can claim it.
+    // retained so the same-key retry can recover (and any other key is
+    // blocked while the retry is in flight).
     const afterFail = await db
       .prepare("SELECT status, post_idempotency_key FROM review_sessions WHERE id = ?")
       .bind(submit.value.session.id)
       .first<{ status: string; post_idempotency_key: string | null }>();
     expect(afterFail?.status).toBe("PENDING_REVIEW");
-    expect(afterFail?.post_idempotency_key).toBeNull();
+    expect(afterFail?.post_idempotency_key).toBe("release-retry-key");
 
-    // Zero financial mutation from the failed attempt.
+    // A different-key attempt is rejected while the same-key retry is
+    // pending — the slot is held, so this must surface as a claim
+    // conflict with zero mutation.
+    const blocked = await reviewService.confirmReceipt(
+      confirmInput(submit.value.session.id, seed.ownerId, {
+        accountId: seed.accountId,
+        idempotencyKey: "different-key-while-held",
+      })
+    );
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.error.code).toBe("SESSION_CLAIM_CONFLICT");
     expect(await countTransactions()).toBe(0);
     expect(await countLedgerEntries()).toBe(0);
 
-    // Retry with a valid account + the same key — the claim slot is
-    // free again so the new claim succeeds.
+    // Retry with a valid account + the same key — the same-key retry
+    // is admitted (ALREADY_CLAIMED_SAME_KEY) and recovers the flow.
     const second = await reviewService.confirmReceipt(
       confirmInput(submit.value.session.id, seed.ownerId, {
         accountId: seed.accountId,
@@ -1194,45 +1217,6 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     expect(persisted?.claim_token).not.toBeNull();
   });
 
-  it("releaseClaim with a wrong token is a no-op (no clobber underneath another caller)", async () => {
-    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "release-noop");
-    const submit = await reviewService.submitForReview({
-      documentId,
-      ocrResult: highConfidenceOcr(),
-      confirmingMemberId: seed.ownerId,
-    });
-    expect(submit.ok).toBe(true);
-    if (!submit.ok) return;
-
-    const sessionId = submit.value.session.id;
-    const claim = await reviewRepo.claimSession(sessionId, "held-key");
-    expect(claim.code).toBe("CLAIMED");
-    if (claim.code !== "CLAIMED") return;
-    const legitToken = claim.claimToken;
-
-    // A foreign caller (or a stale same-key retry that does not own the
-    // token) attempts to release with the WRONG token. The slot must
-    // remain held.
-    await reviewRepo.releaseClaim(sessionId, "held-key", "definitely-not-the-token");
-
-    const persisted = await db
-      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
-      .bind(sessionId)
-      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
-    expect(persisted?.post_idempotency_key).toBe("held-key");
-    expect(persisted?.claim_token).toBe(legitToken);
-
-    // The legit owner of the token can release — that DOES clear the
-    // slot, confirming the protocol is sound.
-    await reviewRepo.releaseClaim(sessionId, "held-key", legitToken);
-    const cleared = await db
-      .prepare("SELECT post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
-      .bind(sessionId)
-      .first<{ post_idempotency_key: string | null; claim_token: string | null }>();
-    expect(cleared?.post_idempotency_key).toBeNull();
-    expect(cleared?.claim_token).toBeNull();
-  });
-
   it("a third-key caller cannot finalize while the original claimer holds a different key", async () => {
     const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "third-key-blocked");
     const submit = await reviewService.submitForReview({
@@ -1251,14 +1235,203 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     const third = await reviewRepo.claimSession(sessionId, "key-Y");
     expect(third.code).toBe("ALREADY_CLAIMED_DIFFERENT_KEY");
 
-    // A same-key retry sees ALREADY_CLAIMED_SAME_KEY (admitted) but is
-    // NOT issued a token: the retry is read-only on the slot.
+    // A same-key retry sees ALREADY_CLAIMED_SAME_KEY (admitted) — the
+    // retry is read-only on the slot and is allowed to resume the
+    // post step. No token is issued to the retry.
     const sameKeyRetry = await reviewRepo.claimSession(sessionId, "key-X");
     expect(sameKeyRetry.code).toBe("ALREADY_CLAIMED_SAME_KEY");
 
     // No transaction rows have been produced — only the original claimer
     // could possibly post.
     expect(await countTransactions()).toBe(0);
+  });
+
+  it("original token owner fails → same-key retry succeeds → third different key remains blocked (exactly one transaction)", async () => {
+    const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, "claim-retain-interleave");
+    const submit = await reviewService.submitForReview({
+      documentId,
+      ocrResult: highConfidenceOcr(),
+      confirmingMemberId: seed.ownerId,
+    });
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const sessionId = submit.value.session.id;
+    const sharedKey = "interleave-shared-key";
+    const thirdKey = "interleave-third-key";
+
+    // Deterministic interleaving: barrier-coordinated proxy
+    // transactions service that lets the test observe and stage three
+    // concurrent confirmReceipt calls.
+    let originalEnteredPost: (() => void) | null = null;
+    let retryCanResolvePost: (() => void) | null = null;
+    let thirdPartyEnteredClaim: (() => void) | null = null;
+
+    let firstCallResolved = false;
+    let thirdCallResolved = false;
+
+    const stagedTx = new Proxy(txService, {
+      get(target, prop, receiver) {
+        if (prop !== "postIncomeExpense") {
+          return Reflect.get(target, prop, receiver);
+        }
+        return async (...args: unknown[]) => {
+          // Identify which call this is by the idempotency key.
+          const opts = args[1] as { idempotencyKey: string };
+          if (opts.idempotencyKey === sharedKey) {
+            // Distinguish the original (slot was free) from a same-key
+            // retry by checking whether this is the first invocation.
+            if (!firstCallResolved) {
+              // Original caller: signal we are mid-post, then wait
+              // until the third-party caller has been observed at the
+              // claim boundary, then return a non-idempotent failure.
+              firstCallResolved = true;
+              await new Promise<void>((resolve) => {
+                originalEnteredPost = resolve;
+              });
+              return {
+                ok: false,
+                error: { code: "ACCOUNT_INACTIVE", message: "interleave: original failed" },
+              };
+            }
+            // Same-key retry: signal and wait for the test to release
+            // us after asserting that the third key was blocked.
+            await new Promise<void>((resolve) => {
+              retryCanResolvePost = resolve;
+            });
+            return Reflect.apply(
+              target.postIncomeExpense as (...a: unknown[]) => unknown,
+              target,
+              args
+            ) as Promise<
+              | { ok: true; value: { transaction: { id: number } } }
+              | { ok: false; error: { code: string; message: string } }
+            >;
+          }
+          thirdCallResolved = true;
+          // Should never reach here: the third party is blocked at the
+          // claim boundary before reaching postIncomeExpense.
+          return {
+            ok: false,
+            error: { code: "ACCOUNT_INACTIVE", message: "interleave: third should not reach post" },
+          };
+        };
+      },
+    });
+
+    // Wrap claimSession so we can observe the third-party caller
+    // entering the claim boundary while the original is mid-post.
+    const stagedRepo = new Proxy(reviewRepo, {
+      get(target, prop, receiver) {
+        if (prop !== "claimSession") {
+          return Reflect.get(target, prop, receiver);
+        }
+        return async (...args: unknown[]) => {
+          const result = await Reflect.apply(
+            target.claimSession as (...a: unknown[]) => unknown,
+            target,
+            args
+          );
+          const r = result as { code: string };
+          if (r.code === "ALREADY_CLAIMED_DIFFERENT_KEY" && thirdPartyEnteredClaim === null) {
+            thirdPartyEnteredClaim = () => {};
+          }
+          return result;
+        };
+      },
+    });
+
+    const stagedService = new ReviewApplicationService(
+      stagedRepo as unknown as ReviewSessionRepository,
+      docService,
+      stagedTx as unknown as TransactionApplicationService,
+      accountRepo,
+      categoryRepo
+    );
+
+    // Kick off the original caller. Do NOT await — we want to drive it
+    // through the interleaving points deterministically.
+    const originalP = stagedService.confirmReceipt(
+      confirmInput(sessionId, seed.ownerId, { idempotencyKey: sharedKey })
+    );
+
+    // Wait until the original caller is inside postIncomeExpense.
+    await waitFor(() => originalEnteredPost !== null);
+    // Now the slot is held by `sharedKey`. Start the third party —
+    // it must be rejected at the claim boundary.
+    const thirdPartyP = stagedService.confirmReceipt(
+      confirmInput(sessionId, seed.ownerId, { idempotencyKey: thirdKey })
+    );
+    await waitFor(() => thirdPartyEnteredClaim !== null);
+    // Third party must resolve with SESSION_CLAIM_CONFLICT and ZERO
+    // mutation; the post layer must not be touched.
+    const thirdResult = await thirdPartyP;
+    expect(thirdResult.ok).toBe(false);
+    if (thirdResult.ok) return;
+    expect(thirdResult.error.code).toBe("SESSION_CLAIM_CONFLICT");
+    expect(thirdCallResolved).toBe(false);
+    expect(await countTransactions()).toBe(0);
+
+    // Now start the same-key retry — admitted via ALREADY_CLAIMED_SAME_KEY,
+    // sits in postIncomeExpense waiting to be released.
+    const retryP = stagedService.confirmReceipt(
+      confirmInput(sessionId, seed.ownerId, { idempotencyKey: sharedKey })
+    );
+    await waitFor(() => retryCanResolvePost !== null);
+
+    // Let the original caller resolve with its non-idempotent failure.
+    if (originalEnteredPost !== null) originalEnteredPost();
+    const originalResult = await originalP;
+    expect(originalResult.ok).toBe(false);
+    if (originalResult.ok) return;
+    expect(originalResult.error.code).toBe("ACCOUNT_INACTIVE");
+
+    // The claim must STILL be held by the shared key — the service
+    // never released it. The third-party slot is still occupied by the
+    // same key.
+    const afterOriginalFail = await db
+      .prepare("SELECT status, post_idempotency_key, claim_token FROM review_sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ status: string; post_idempotency_key: string | null; claim_token: string | null }>();
+    expect(afterOriginalFail?.status).toBe("PENDING_REVIEW");
+    expect(afterOriginalFail?.post_idempotency_key).toBe(sharedKey);
+    expect(afterOriginalFail?.claim_token).not.toBeNull();
+    expect(await countTransactions()).toBe(0);
+
+    // While the same-key retry is in flight (still waiting on its
+    // barrier), another third-party attempt must still be blocked.
+    const thirdPartyAgainP = stagedService.confirmReceipt(
+      confirmInput(sessionId, seed.ownerId, { idempotencyKey: thirdKey })
+    );
+    const thirdAgainResult = await thirdPartyAgainP;
+    expect(thirdAgainResult.ok).toBe(false);
+    if (thirdAgainResult.ok) return;
+    expect(thirdAgainResult.error.code).toBe("SESSION_CLAIM_CONFLICT");
+
+    // Release the same-key retry to finalize.
+    if (retryCanResolvePost !== null) retryCanResolvePost();
+    const retryResult = await retryP;
+    expect(retryResult.ok).toBe(true);
+    if (!retryResult.ok) return;
+
+    // Exactly one transaction row; session CONFIRMED and bound to the
+    // shared key.
+    expect(await countTransactions()).toBe(1);
+    expect(await countLedgerEntries()).toBe(2);
+    const persisted = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string | null;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+      }>();
+    expect(persisted?.status).toBe("CONFIRMED");
+    expect(persisted?.post_idempotency_key).toBe(sharedKey);
+    expect(persisted?.claim_token).toBeNull();
+    expect(persisted?.linked_transaction_id).toBe(retryResult.value.transactionId);
   });
 
   it("a same-key retry after a forced post failure does not release the slot and recovers cleanly", async () => {

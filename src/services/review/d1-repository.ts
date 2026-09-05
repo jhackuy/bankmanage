@@ -171,13 +171,14 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     // Same-key retry: slot already holds our key from a prior
     // mid-write crash. The post step's idempotency_key UNIQUE keeps
     // the retry a no-op at the financial layer. The retry is admitted
-    // to the post step, but it does NOT own the claim token — only
-    // the original claimer can call releaseClaim.
+    // to the post step. The claim is intentionally retained across the
+    // post failure so that no other key can interleave while a same-key
+    // retry is in flight.
     if (existing.postIdempotencyKey === postIdempotencyKey) {
       if (existing.claimToken === null) {
         throw new Error("claim slot held without token");
       }
-      return { code: "ALREADY_CLAIMED_SAME_KEY", claimToken: existing.claimToken };
+      return { code: "ALREADY_CLAIMED_SAME_KEY" };
     }
     // Different-key conflict: another caller is mid-flight with a
     // distinct idempotency key. Reject before any financial write.
@@ -186,11 +187,10 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
     }
 
     // Step 2: slot is NULL — attempt the atomic claim with optimistic
-    // lock on (status, kind, slot IS NULL). Generate a UUID token
-    // that authorizes the matching releaseClaim. A concurrent caller
-    // could have claimed the slot between our SELECT and UPDATE; the
-    // WHERE clause guards against that race and the UPDATE returns
-    // the persisted token on success.
+    // lock on (status, kind, slot IS NULL). Generate a UUID token so a
+    // future confirmSession can clear it on CONFIRMED. A concurrent
+    // caller could have claimed the slot between our SELECT and UPDATE;
+    // the WHERE clause guards against that race.
     const claimToken = crypto.randomUUID();
     const row = await this.db
       .prepare(
@@ -207,7 +207,7 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
       .bind(postIdempotencyKey, claimToken, id)
       .first<{ claim_token: string }>();
     if (row !== null && row.claim_token !== null) {
-      return { code: "CLAIMED", claimToken: row.claim_token };
+      return { code: "CLAIMED" };
     }
 
     // Lost the race to a concurrent claim. Re-check to map to a
@@ -220,34 +220,9 @@ export class D1ReviewSessionRepository implements ReviewSessionRepository {
       if (recheck.claimToken === null) {
         throw new Error("claim slot held without token");
       }
-      return { code: "ALREADY_CLAIMED_SAME_KEY", claimToken: recheck.claimToken };
+      return { code: "ALREADY_CLAIMED_SAME_KEY" };
     }
     return { code: "ALREADY_CLAIMED_DIFFERENT_KEY" };
-  }
-
-  async releaseClaim(id: number, postIdempotencyKey: string, claimToken: string): Promise<void> {
-    // Token-protocol boundary: only release when the session is still
-    // PENDING_REVIEW AND the slot currently holds the key we are
-    // trying to clear AND the stored claim_token matches the token we
-    // were issued. This prevents:
-    //   - a concurrent confirm/reject from clobbering a terminal state;
-    //   - a different-key caller from clearing a slot it doesn't own;
-    //   - a failed same-key caller from clearing the slot underneath
-    //     another in-flight same-key caller (only the original
-    //     claimer holds the token).
-    await this.db
-      .prepare(
-        `UPDATE review_sessions
-           SET post_idempotency_key = NULL,
-               claim_token = NULL,
-               updated_at = datetime('now', 'utc')
-         WHERE id = ?
-           AND status = 'PENDING_REVIEW'
-           AND post_idempotency_key = ?
-           AND claim_token = ?`
-      )
-      .bind(id, postIdempotencyKey, claimToken)
-      .run();
   }
 
   async confirmSession(

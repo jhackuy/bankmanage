@@ -40,12 +40,14 @@
  *      layer).
  *   6. Post the transaction via TransactionApplicationService with
  *      `sourceEvidenceRef = "doc:" + documentId` and the caller-supplied
- *      idempotencyKey. If the post fails for any non-idempotent reason
- *      (ACCOUNT_NOT_FOUND, ACCOUNT_INACTIVE, CURRENCY_MISMATCH, etc.),
- *      the claim is released so the caller can retry with corrected
- *      inputs.
+ *      idempotencyKey. The claim is intentionally RETAINED on every
+ *      post failure — only a same-key retry is admitted to recover,
+ *      every other key remains blocked. This prevents an original
+ *      caller from clearing the slot underneath an in-flight same-key
+ *      retry after the original caller's post fails.
  *   7. Confirm the session via the repository with
- *      `postIdempotencyKey` and `linkedTransactionId`.
+ *      `postIdempotencyKey` and `linkedTransactionId`. Confirmation
+ *      clears the claim token as part of moving to CONFIRMED.
  *   8. If confirmSession throws DUPLICATE_IDEMPOTENCY_KEY (defense in
  *      depth — should not happen now that the claim pre-empts the race),
  *      look up the already-linked transaction and return it as success
@@ -325,24 +327,19 @@ export class ReviewApplicationService {
     // A same-key retry is admitted (the transactions UNIQUE keeps the
     // retry a no-op at the financial layer); a different-key caller is
     // rejected with SESSION_CLAIM_CONFLICT before any transaction is
-    // posted.
-    //
-    // The claim returns a token that authorizes releaseClaim. Only the
-    // caller that received a fresh CLAIMED token owns the slot; a
-    // same-key retry is admitted to the post step but does NOT own the
-    // token and must NOT call releaseClaim (it would clobber the slot
-    // underneath the in-flight same-key caller).
+    // posted. The claim is retained across post failures — only a
+    // same-key retry is admitted to recover, every other key remains
+    // blocked.
     const claim = await this.reviewRepo.claimSession(input.sessionId, input.idempotencyKey);
-    let claimToken: string | null = null;
     switch (claim.code) {
       case "CLAIMED":
-        claimToken = claim.claimToken;
-        break;
       case "ALREADY_CLAIMED_SAME_KEY":
-        // Retry path: we are admitted to the post step but do NOT own
-        // the token. If the post fails we must NOT releaseClaim — that
-        // would clobber the slot underneath the in-flight caller that
-        // holds the token.
+        // CLAIMED: fresh slot reserved for this idempotency key.
+        // ALREADY_CLAIMED_SAME_KEY: a prior caller's post crashed mid-
+        // write; we are admitted again to resume the flow. The claim
+        // is intentionally retained — we never clear it from the
+        // service. The transactions UNIQUE keeps the financial layer
+        // idempotent across retries.
         break;
       case "ALREADY_CLAIMED_DIFFERENT_KEY":
         return fail(
@@ -359,8 +356,9 @@ export class ReviewApplicationService {
 
     // STEP 2: Post the transaction. sourceEvidenceRef binds the ledger
     // row to the underlying document id (the M3A SPEC §6.2 audit
-    // linkage). On non-idempotent failure, release the claim so the
-    // caller can retry with corrected inputs.
+    // linkage). On any non-idempotent failure we DO NOT clear the
+    // claim — the slot is intentionally retained so the same key can
+    // retry to recover and every other key remains blocked.
     const postResult = await this.txService.postIncomeExpense("EXPENSE", {
       memberId: input.memberId,
       accountId: input.accountId,
@@ -373,17 +371,6 @@ export class ReviewApplicationService {
       ...(input.description !== undefined ? { description: input.description } : {}),
     });
     if (!postResult.ok) {
-      // Release the claim ONLY when we own the token (CLAIMED branch).
-      // Same-key retries do not own the token; releasing from a retry
-      // would clobber the slot underneath the in-flight same-key
-      // caller. Best-effort: a release failure (e.g. session moved to
-      // a terminal state in the same window) leaves the slot held,
-      // which is the safe direction — the next caller's claim will
-      // return ALREADY_CLAIMED_SAME_KEY and proceed via the
-      // transactions UNIQUE.
-      if (claimToken !== null) {
-        await this.reviewRepo.releaseClaim(input.sessionId, input.idempotencyKey, claimToken);
-      }
       return fail(mapTxPostError(postResult.error.code), postResult.error.message);
     }
 
