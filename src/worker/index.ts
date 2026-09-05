@@ -26,6 +26,7 @@ import { D1ReminderRepository } from "../services/term-deposit/d1-reminder-repos
 import { D1TermDepositRepository } from "../services/term-deposit/d1-repository.js";
 import { TermDepositReminderService } from "../services/term-deposit/reminder-service.js";
 import { readAllowedUserIds } from "../services/telegram/allowed-user-ids.js";
+import { handleScheduled } from "./scheduled.js";
 import type { D1Database } from "../adapters/d1/types.js";
 import type { Env } from "./env.js";
 
@@ -143,4 +144,11 @@ app.get("/*", async (c) => {
   return c.text("UI not available", 503);
 });
 
-export default app;
+// ── Worker exports ──────────────────────────────────────────────────────────
+// Cloudflare Workers supports both `fetch` (HTTP) and `scheduled` (cron)
+// handlers on the module's default export. The cron handler drives the
+// outbound Telegram reminder path; see `./scheduled.ts`.
+export default {
+  fetch: app.fetch,
+  scheduled: handleScheduled,
+};

@@ -13,6 +13,16 @@
     "binding": "ASSETS",
   },
 
+  // Cron triggers — drive the outbound Telegram reminder delivery path.
+  // SPEC §5: the scheduler is idempotent. Each tick selects PENDING
+  // reminders due on the configured UTC date and marks them DELIVERED
+  // only after a successful Telegram transport. Hourly cadence is
+  // conservative: a daily 09:00 UTC tick is also defensible, but hourly
+  // keeps missed-reminder recovery below the SPEC window.
+  "triggers": {
+    "crons": ["0 * * * *"],
+  },
+
   // Environment-specific configuration
   "env": {
     "pilot": {
