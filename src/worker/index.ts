@@ -69,7 +69,15 @@ app.post("/telegram/webhook", async (c) => {
   const db = c.env.DB as unknown as D1Database;
   const adapter = new CloudflareTelegramAdapter({ botToken });
   const identityRepository = new D1TelegramIdentityRepository(db);
-  const miniAppLauncher = miniAppLauncherFromEnv(miniAppUrlFromEnv(c.env));
+  let miniAppLauncher: ReturnType<typeof miniAppLauncherFromEnv>;
+  try {
+    miniAppLauncher = miniAppLauncherFromEnv(miniAppUrlFromEnv(c.env));
+  } catch {
+    // Fail closed: a missing/malformed/non-HTTPS MINI_APP_URL would
+    // otherwise cause the /start reply to advertise a dead or insecure
+    // Mini App button.
+    return c.json({ error: "Mini App URL not configured" }, 503);
+  }
   // D1-backed deduper: the UNIQUE constraint on update_id (migration 0014)
   // is the race-safe boundary across Worker isolates. An in-memory deduper
   // would be wiped by isolate recycling and never span isolates.
@@ -100,13 +108,29 @@ app.post("/telegram/webhook", async (c) => {
   return router.fetch(c.req.raw, c.env, c.executionCtx as never);
 });
 
-function miniAppUrlFromEnv(env: Env): string {
-  // Optional non-secret binding for the deployed Mini App URL. Falls back
-  // to a deterministic placeholder when the binding is missing — the actual
-  // UX lives in the Mini App, so an unconfigured URL only affects the
-  // welcome button, not authorization.
-  const url = (env as unknown as Record<string, unknown>)["MINI_APP_URL"];
-  return typeof url === "string" && url.length > 0 ? url : "https://example.invalid/mini-app";
+/**
+ * Resolve the Mini App URL from the env binding. Fails closed: the value
+ * must be present, parseable as a URL, and HTTPS. This prevents the
+ * welcome reply from advertising a dead/insecure Mini App button when the
+ * non-secret `MINI_APP_URL` binding is misconfigured.
+ *
+ * Exported for unit testing.
+ */
+export function miniAppUrlFromEnv(env: Env): string {
+  const raw = (env as unknown as Record<string, unknown>)["MINI_APP_URL"];
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new Error("MINI_APP_URL is missing or empty");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("MINI_APP_URL is not a valid URL");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("MINI_APP_URL must use HTTPS");
+  }
+  return parsed.toString();
 }
 
 // ── Static UI (served by Cloudflare ASSETS binding) ──────────────────────────
