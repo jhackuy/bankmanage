@@ -42,6 +42,12 @@ export const REMINDER_STATUSES: readonly ReminderStatus[] = ["PENDING", "MUTED",
  * Logical reminder record. One row per (deposit_id, offset_kind); the UNIQUE
  * constraint on that pair is the idempotency boundary enforced by the D1
  * repository layer.
+ *
+ * `claimedAt` is the atomic delivery-claim boundary added in migration 0015.
+ * It is set by `claimForDelivery` before the outbound Telegram transport
+ * and cleared by `releaseClaim` on a definite send failure. Only a row with
+ * `claimedAt !== null` can be transitioned to DELIVERED, so two concurrent
+ * Cron invocations cannot both finalize the same logical delivery.
  */
 export interface ReminderRecord {
   readonly id: number;
@@ -52,6 +58,7 @@ export interface ReminderRecord {
   readonly mutedAt: string | null;
   readonly deliveredAt: string | null;
   readonly cancelledAt: string | null;
+  readonly claimedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

@@ -325,7 +325,12 @@ describe("mute leaves deposit state unchanged", () => {
     const reminderId = scan.value.createdIds[0]!;
 
     // Force-deliver via repository directly (delivery out of scope).
-    await new D1ReminderRepository(db).markDelivered(reminderId);
+    // markDelivered now requires an outstanding delivery claim (SPEC §5
+    // finalize-DELIVERED boundary); releaseClaim is a no-op after
+    // markDelivered because the row has moved out of PENDING.
+    const repo = new D1ReminderRepository(db);
+    await repo.claimForDelivery(reminderId);
+    await repo.markDelivered(reminderId);
 
     const r = await reminderService.mute(reminderId);
     expect(r.ok).toBe(false);

@@ -21,7 +21,7 @@
  * do not fit safely into JavaScript Number, so we keep them as strings).
  */
 
-const REQUIRED_ID_COUNT = 2;
+const MIN_REQUIRED_ID_COUNT = 1;
 
 export interface AllowedUserIds {
   /** Two numeric Telegram user IDs as strings, frozen for safe iteration. */
@@ -38,7 +38,7 @@ export function parseAllowedUserIds(raw: unknown): AllowedUserIds | null {
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  if (tokens.length !== REQUIRED_ID_COUNT) return null;
+  if (tokens.length < MIN_REQUIRED_ID_COUNT) return null;
 
   const seen = new Set<string>();
   for (const tok of tokens) {

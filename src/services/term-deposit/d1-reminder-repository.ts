@@ -24,6 +24,7 @@ interface ReminderRow {
   muted_at: string | null;
   delivered_at: string | null;
   cancelled_at: string | null;
+  claimed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +39,7 @@ function rowToRecord(row: ReminderRow): ReminderRecord {
     mutedAt: row.muted_at,
     deliveredAt: row.delivered_at,
     cancelledAt: row.cancelled_at,
+    claimedAt: row.claimed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -147,18 +149,59 @@ export class D1ReminderRepository implements ReminderRepository {
   }
 
   async markDelivered(id: number): Promise<ReminderRecord | null> {
+    // SPEC §5 finalize-DELIVERED boundary: the row MUST still be PENDING
+    // and MUST hold an outstanding delivery claim. claimForDelivery set
+    // claimed_at; releaseClaim clears it; transport success must call
+    // markDelivered before the next tick's claimForDelivery clears the
+    // claim. The combined guard makes it impossible to finalize a row
+    // that was never claimed or that another worker has already released.
     const row = await this.db
       .prepare(
         `UPDATE term_deposit_reminders
          SET status = 'DELIVERED',
              delivered_at = datetime('now', 'utc'),
+             claimed_at = NULL,
              updated_at = datetime('now', 'utc')
-         WHERE id = ? AND status IN ('PENDING', 'MUTED')
+         WHERE id = ? AND status = 'PENDING' AND claimed_at IS NOT NULL
          RETURNING *`
       )
       .bind(id)
       .first<ReminderRow>();
     return row === null ? null : rowToRecord(row);
+  }
+
+  async claimForDelivery(id: number): Promise<boolean> {
+    // Atomic compare-and-set: only one concurrent caller observes
+    // changes=1. The other sees changes=0 and skips the reminder.
+    // The WHERE clause requires PENDING AND claimed_at IS NULL so a
+    // row already in flight (or already DELIVERED/MUTED/CANCELLED) is
+    // never re-claimed.
+    const result = await this.db
+      .prepare(
+        `UPDATE term_deposit_reminders
+         SET claimed_at = datetime('now', 'utc'),
+             updated_at = datetime('now', 'utc')
+         WHERE id = ? AND status = 'PENDING' AND claimed_at IS NULL`
+      )
+      .bind(id)
+      .run();
+    return (result.meta.changes ?? 0) > 0;
+  }
+
+  async releaseClaim(id: number): Promise<boolean> {
+    // Release the claim on a definite transport failure so the next tick
+    // can retry. Only clears claimed_at; status stays PENDING. Returns
+    // true if a claim was actually released, false if there was none.
+    const result = await this.db
+      .prepare(
+        `UPDATE term_deposit_reminders
+         SET claimed_at = NULL,
+             updated_at = datetime('now', 'utc')
+         WHERE id = ? AND claimed_at IS NOT NULL AND status = 'PENDING'`
+      )
+      .bind(id)
+      .run();
+    return (result.meta.changes ?? 0) > 0;
   }
 
   async cancelPendingForDeposit(depositId: number): Promise<number> {

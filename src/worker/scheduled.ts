@@ -61,6 +61,12 @@ export interface RunCronOptions {
  * zeros if nothing is due) and `null` when the cron is fail-closed for the
  * given env. Callers (the Worker `scheduled` handler, the unit tests) can
  * inspect the return value.
+ *
+ * The parsed `TELEGRAM_ALLOWED_USER_IDS` allowlist is passed into the
+ * delivery service. The service intersects the resolved persisted
+ * identity with this exact set before transport so a stale/additional
+ * identity outside the managed two-user allowlist can never receive
+ * outbound financial reminder data.
  */
 export async function runTelegramReminderCron(opts: RunCronOptions): Promise<ReminderDeliveryOutcome | null> {
   const env = opts.env;
@@ -68,7 +74,8 @@ export async function runTelegramReminderCron(opts: RunCronOptions): Promise<Rem
   if (typeof botToken !== "string" || botToken.length === 0) {
     return null;
   }
-  if (readAllowedUserIds(env as unknown as Record<string, unknown>) === null) {
+  const allowedUserIds = readAllowedUserIds(env as unknown as Record<string, unknown>);
+  if (allowedUserIds === null) {
     return null;
   }
   const db = env.DB as unknown as D1Database | undefined;
@@ -89,6 +96,7 @@ export async function runTelegramReminderCron(opts: RunCronOptions): Promise<Rem
     identities: identityRepository,
     fromDate: today,
     toDate: today,
+    allowedUserIds,
   });
   return delivery.deliverDueReminders();
 }

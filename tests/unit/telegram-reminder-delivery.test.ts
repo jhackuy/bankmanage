@@ -194,3 +194,41 @@ describe("mute does NOT alter deposit business state", () => {
     expect(outcome.delivered).toBe(0);
   });
 });
+
+describe("delivery service — allowlist enforcement", () => {
+  it("a resolved identity outside the managed allowlist is skipped, transport not called", async () => {
+    await createActiveDeposit(seeded.memberId, seeded.accountId, seeded.bankId);
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    if (!scan.ok) return;
+
+    // The OWNER is seeded with FAKE_OWNER_TELEGRAM_ID (100000000001).
+    // The allowed allowlist deliberately includes ONLY the MEMBER ID, so
+    // the OWNER's persisted identity is not in the set. The service
+    // must refuse to send and must keep the row PENDING.
+    const delivery = new TelegramReminderDeliveryService({
+      adapter,
+      reminderRepository: reminderRepo,
+      depositRepository: depositRepo,
+      identities: identityRepo,
+      fromDate: "2026-01-01",
+      toDate: "2026-04-01",
+      allowedUserIds: {
+        ids: new Set([FAKE_MEMBER_TELEGRAM_ID]),
+        ok: true as const,
+      },
+    });
+    const outcome = await delivery.deliverDueReminders();
+    expect(outcome.delivered).toBe(0);
+    expect(adapter.sentMessages).toHaveLength(0);
+
+    // Every due reminder is still PENDING — the next tick can retry if
+    // the managed allowlist is repaired.
+    const stillPending = await db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM term_deposit_reminders WHERE target_date BETWEEN '2026-01-01' AND '2026-04-01' AND status = 'PENDING'"
+      )
+      .first<{ c: number }>();
+    expect(stillPending?.c).toBeGreaterThan(0);
+  });
+});

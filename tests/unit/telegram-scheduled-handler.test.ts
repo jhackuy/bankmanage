@@ -381,6 +381,125 @@ describe("cron handler — fail-closed on missing managed configuration", () => 
   });
 });
 
+describe("cron handler — concurrent overlapping invocations", () => {
+  it("two overlapping Cron runs produce exactly one logical delivery per reminder", async () => {
+    const depositId = await createActiveDeposit();
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    if (!scan.ok) return;
+
+    // Capture the due reminders we'll race on. We expect exactly one
+    // send per reminder regardless of concurrency.
+    const dueRows = await db
+      .prepare("SELECT id FROM term_deposit_reminders WHERE deposit_id = ? AND target_date = ?")
+      .bind(depositId, TODAY)
+      .all<{ id: number }>();
+    const dueIds = dueRows.results.map((r) => r.id);
+    expect(dueIds.length).toBeGreaterThan(0);
+
+    // Build a "slow" adapter that sleeps before resolving. The sleep
+    // happens AFTER claimForDelivery has written claimed_at, so a
+    // concurrent second worker that calls listDueReminders +
+    // claimForDelivery will observe claimed_at IS NOT NULL and skip.
+    // The race-safe boundary is the atomic UPDATE WHERE claimed_at IS
+    // NULL, not the transport itself.
+    const slowAdapter = new FakeTelegramAdapter();
+    const originalSend = slowAdapter.sendMessage.bind(slowAdapter);
+    slowAdapter.sendMessage = async (chatId, text, options) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return originalSend(chatId, text, options);
+    };
+
+    const env = makeEnv();
+    // Fire two Cron ticks concurrently. Both observe the same PENDING
+    // list and both call claimForDelivery, but the atomic compare-and-set
+    // on claimed_at guarantees exactly one winner per reminder.
+    const [a, b] = await Promise.all([
+      runTelegramReminderCron({
+        env,
+        ctx: {} as never,
+        today: () => TODAY,
+        buildAdapter: ADAPTER_FOR(slowAdapter),
+      }),
+      runTelegramReminderCron({
+        env,
+        ctx: {} as never,
+        today: () => TODAY,
+        buildAdapter: ADAPTER_FOR(slowAdapter),
+      }),
+    ]);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    if (a === null || b === null) return;
+
+    // Total sent across both workers must equal the number of due
+    // reminders — no duplicates.
+    expect(slowAdapter.sentMessages).toHaveLength(dueIds.length);
+
+    // Every due reminder row is DELIVERED (not PENDING, not double-finalized).
+    const delivered = await db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM term_deposit_reminders WHERE deposit_id = ? AND status = 'DELIVERED'"
+      )
+      .bind(depositId)
+      .first<{ c: number }>();
+    expect(delivered?.c).toBe(dueIds.length);
+
+    // No row is still PENDING for today's target_date.
+    const stillPending = await db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM term_deposit_reminders WHERE deposit_id = ? AND target_date = ? AND status = 'PENDING'"
+      )
+      .bind(depositId, TODAY)
+      .first<{ c: number }>();
+    expect(stillPending?.c).toBe(0);
+  });
+});
+
+describe("cron handler — managed allowlist enforcement", () => {
+  it("a persisted identity outside the exact managed allowlist receives nothing", async () => {
+    const depositId = await createActiveDeposit();
+    const scan = await reminderService.scanAll();
+    expect(scan.ok).toBe(true);
+    if (!scan.ok) return;
+
+    // Sanity: at least one due reminder exists.
+    const dueRow = await db
+      .prepare("SELECT id FROM term_deposit_reminders WHERE deposit_id = ? AND target_date = ?")
+      .bind(depositId, TODAY)
+      .first<{ id: number }>();
+    expect(dueRow).not.toBeNull();
+    if (dueRow === null) return;
+
+    // The persisted OWNER identity is FAKE_OWNER_USER_ID (seeded in
+    // beforeEach). The managed allowlist below deliberately excludes
+    // OWNER so the resolved identity is NOT in the allowlist — the
+    // service MUST refuse to send and MUST keep the row PENDING.
+    const adapter = new FakeTelegramAdapter();
+    const outcome = await runTelegramReminderCron({
+      env: makeEnv({
+        TELEGRAM_ALLOWED_USER_IDS: `${FAKE_MEMBER_USER_ID}`,
+      }),
+      ctx: {} as never,
+      today: () => TODAY,
+      buildAdapter: ADAPTER_FOR(adapter),
+    });
+    expect(outcome).not.toBeNull();
+    if (outcome === null) return;
+    expect(outcome.delivered).toBe(0);
+    expect(adapter.sentMessages).toHaveLength(0);
+
+    // Reminder row stays PENDING — no transport was attempted against an
+    // out-of-allowlist recipient, so the next tick can retry if the
+    // managed allowlist is repaired.
+    const stillPending = await db
+      .prepare("SELECT status FROM term_deposit_reminders WHERE id = ?")
+      .bind(dueRow.id)
+      .first<{ status: string }>();
+    expect(stillPending?.status).toBe("PENDING");
+  });
+});
+
 describe("utcTodayDate", () => {
   it("returns YYYY-MM-DD in UTC", () => {
     const result = utcTodayDate(new Date(Date.UTC(2026, 8, 5, 23, 59, 59)));

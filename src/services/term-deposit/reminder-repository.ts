@@ -71,8 +71,39 @@ export interface ReminderRepository {
   markMutedForDeposit(depositId: number): Promise<number>;
 
   /**
-   * Mark a reminder as DELIVERED. Delivery is out of M1C scope; the D1
-   * repository only persists the status transition.
+   * Atomically claim a PENDING reminder for outbound Telegram delivery.
+   * Returns true if this caller is the one that observed the claim
+   * transition (changes=1), false if another worker already holds the
+   * claim or the row is no longer PENDING.
+   *
+   * Race-safe boundary (SPEC §5 "scheduler must be idempotent"): two
+   * concurrent Cron invocations that both call claimForDelivery for the
+   * same reminder id will see exactly one `true` and one `false`, so
+   * duplicate logical delivery is impossible even under overlapping
+   * isolates. The caller MUST release the claim (releaseClaim) on a
+   * definite transport failure so the next tick can retry; final
+   * delivery (markDelivered) must succeed within the same window.
+   */
+  claimForDelivery(id: number): Promise<boolean>;
+
+  /**
+   * Release an outstanding delivery claim so the next cron tick can retry.
+   * Only clears `claimed_at`; does NOT change status. Safe to call after a
+   * transport failure. Returns true if a claim was released, false if the
+   * row had no claim to release.
+   */
+  releaseClaim(id: number): Promise<boolean>;
+
+  /**
+   * Mark a reminder as DELIVERED. The D1 repository persists the status
+   * transition only if the row is still PENDING and has an outstanding
+   * delivery claim (claimed_at IS NOT NULL) — that is the SPEC §5
+   * "finalize DELIVERED only after accepted send" boundary.
+   *
+   * Returns the updated record, or `null` if the row was concurrently
+   * muted/cancelled or no longer held a claim. A null result means the
+   * transport message has already been accepted (the row state moved
+   * elsewhere); callers do not retry.
    */
   markDelivered(id: number): Promise<ReminderRecord | null>;
 
