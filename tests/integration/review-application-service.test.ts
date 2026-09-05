@@ -90,7 +90,14 @@ beforeEach(async () => {
   reviewRepo = new D1ReviewSessionRepository(db);
   docService = new DocumentApplicationService(docRepo, storage);
   txService = new TransactionApplicationService(txRepo, accountRepo, categoryRepo);
-  reviewService = new ReviewApplicationService(reviewRepo, docService, txService, accountRepo, categoryRepo);
+  reviewService = new ReviewApplicationService(
+    reviewRepo,
+    docService,
+    txService,
+    new TermDepositApplicationService(new D1TermDepositRepository(db)),
+    accountRepo,
+    categoryRepo
+  );
 
   const owner = await db
     .prepare("INSERT INTO household_members (role, display_name) VALUES (?, ?)")
@@ -852,6 +859,7 @@ describe("confirmReceipt — failure injection", () => {
       reviewRepo,
       docService,
       failingTxService as unknown as TransactionApplicationService,
+      new TermDepositApplicationService(new D1TermDepositRepository(db)),
       accountRepo,
       categoryRepo
     );
@@ -1080,6 +1088,7 @@ describe("confirmReceipt — claim/release concurrency", () => {
       flakyReviewRepo,
       docService,
       txService,
+      new TermDepositApplicationService(new D1TermDepositRepository(db)),
       accountRepo,
       categoryRepo
     );
@@ -1169,7 +1178,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     // Reserve the claim directly via the repository: this simulates a
     // caller that is mid-flight on confirmReceipt (the claim UPDATE has
     // run, the transaction INSERT has not yet).
-    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key");
+    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key", "RECEIPT");
     expect(claim.code).toBe("CLAIMED");
 
     // reject() must NOT succeed: the session still has a held claim slot.
@@ -1200,7 +1209,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     if (!submit.ok) return;
 
     const sessionId = submit.value.session.id;
-    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key-correct");
+    const claim = await reviewRepo.claimSession(sessionId, "in-flight-key-correct", "RECEIPT");
     expect(claim.code).toBe("CLAIMED");
 
     // correctFields must NOT succeed while a claim is held.
@@ -1232,17 +1241,17 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     if (!submit.ok) return;
 
     const sessionId = submit.value.session.id;
-    const original = await reviewRepo.claimSession(sessionId, "key-X");
+    const original = await reviewRepo.claimSession(sessionId, "key-X", "RECEIPT");
     expect(original.code).toBe("CLAIMED");
 
     // A different-key caller attempts to claim — must be rejected.
-    const third = await reviewRepo.claimSession(sessionId, "key-Y");
+    const third = await reviewRepo.claimSession(sessionId, "key-Y", "RECEIPT");
     expect(third.code).toBe("ALREADY_CLAIMED_DIFFERENT_KEY");
 
     // A same-key retry sees ALREADY_CLAIMED_SAME_KEY (admitted) — the
     // retry is read-only on the slot and is allowed to resume the
     // post step. No token is issued to the retry.
-    const sameKeyRetry = await reviewRepo.claimSession(sessionId, "key-X");
+    const sameKeyRetry = await reviewRepo.claimSession(sessionId, "key-X", "RECEIPT");
     expect(sameKeyRetry.code).toBe("ALREADY_CLAIMED_SAME_KEY");
 
     // No transaction rows have been produced — only the original claimer
@@ -1348,6 +1357,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
       stagedRepo as unknown as ReviewSessionRepository,
       docService,
       stagedTx as unknown as TransactionApplicationService,
+      new TermDepositApplicationService(new D1TermDepositRepository(db)),
       accountRepo,
       categoryRepo
     );
@@ -1471,6 +1481,7 @@ describe("review_sessions — claim-token protocol interleaving", () => {
       reviewRepo,
       docService,
       flakyTxService as unknown as TransactionApplicationService,
+      new TermDepositApplicationService(new D1TermDepositRepository(db)),
       accountRepo,
       categoryRepo
     );

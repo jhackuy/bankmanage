@@ -152,6 +152,7 @@ export type ServiceErrorCode =
   | "ILLEGAL_TRANSITION"
   | "STALE_STATE"
   | "DUPLICATE_LINK"
+  | "DUPLICATE_IDEMPOTENCY_KEY"
   | "OVERFLOW"
   | "INTERNAL";
 
