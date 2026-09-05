@@ -36,6 +36,7 @@ import type {
 } from "./update-envelope.js";
 import { parseTelegramUpdate } from "./update-parser.js";
 import type { AllowedUserIds } from "./allowed-user-ids.js";
+import type { ReminderCallbackActions } from "./callback-actions.js";
 
 const START_COMMAND = "/start";
 
@@ -60,6 +61,13 @@ export interface TelegramBotServiceOptions {
   readonly miniAppLauncher: MiniAppLauncher;
   readonly allowedUserIds: AllowedUserIds;
   readonly deduper?: UpdateDeduper;
+  /**
+   * Optional callback-query action handler. When present, known callback
+   * data (`r:{reminderId}:view` and `r:{reminderId}:mute`) produces a
+   * visible result message after the ACK. When absent, the bot service
+   * still ACKs but does not act on callback data.
+   */
+  readonly callbackActions?: ReminderCallbackActions;
 }
 
 export type BotHandlerResult =
@@ -83,6 +91,7 @@ export class TelegramBotService {
   private readonly _launcher: MiniAppLauncher;
   private readonly _allowed: AllowedUserIds;
   private readonly _deduper: UpdateDeduper;
+  private readonly _callbackActions: ReminderCallbackActions | null;
 
   constructor(opts: TelegramBotServiceOptions) {
     this._adapter = opts.adapter;
@@ -90,6 +99,7 @@ export class TelegramBotService {
     this._launcher = opts.miniAppLauncher;
     this._allowed = opts.allowedUserIds;
     this._deduper = opts.deduper ?? new InMemoryUpdateDeduper();
+    this._callbackActions = opts.callbackActions ?? null;
   }
 
   /**
@@ -114,21 +124,39 @@ export class TelegramBotService {
       };
     }
 
-    if (envelope.callbackQuery !== null) {
-      const botResult = await this.handleCallback(envelope.callbackQuery);
-      return { updateId: envelope.updateId, handled: true, bot: botResult };
-    }
+    // The claim above is atomic at the SQL level (UNIQUE update_id). If
+    // any downstream work below throws (transport failure, DB outage),
+    // we MUST release the claim so a Telegram retry can re-claim and
+    // deliver the visible result. Without release, Telegram's retry would
+    // observe tryClaim === false and the user would see the spinner
+    // resolve with no message — silently lost work.
+    try {
+      if (envelope.callbackQuery !== null) {
+        const botResult = await this.handleCallback(envelope.callbackQuery);
+        return { updateId: envelope.updateId, handled: true, bot: botResult };
+      }
 
-    if (envelope.message !== null) {
-      const botResult = await this.handleMessage(envelope.message);
-      return { updateId: envelope.updateId, handled: true, bot: botResult };
-    }
+      if (envelope.message !== null) {
+        const botResult = await this.handleMessage(envelope.message);
+        return { updateId: envelope.updateId, handled: true, bot: botResult };
+      }
 
-    return {
-      updateId: envelope.updateId,
-      handled: true,
-      bot: { kind: "IGNORED", reason: "No message or callback_query in update" },
-    };
+      return {
+        updateId: envelope.updateId,
+        handled: true,
+        bot: { kind: "IGNORED", reason: "No message or callback_query in update" },
+      };
+    } catch (err) {
+      // Release the claim so the retry path can succeed. We swallow any
+      // release-side failure (e.g. DB is also down) — the retry will
+      // still see a consistent state on the next attempt.
+      try {
+        await this._deduper.release(envelope.updateId);
+      } catch {
+        // intentionally swallowed
+      }
+      throw err;
+    }
   }
 
   private async handleMessage(message: TelegramMessage): Promise<BotHandlerResult> {
@@ -195,9 +223,18 @@ export class TelegramBotService {
       return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
     }
 
-    // Real work for known callback data happens here. For the M4 surface
-    // we acknowledge + record; deeper business actions route through the
-    // Mini App (where the role-gated flows live) rather than the bot.
+    if (this._callbackActions === null) {
+      // No action handler wired for this environment (e.g. tests). ACK
+      // was issued; nothing more to do.
+      return { kind: "REPLIED" };
+    }
+
+    const chatId = query.message !== null ? String(query.message.chat.id) : String(query.from.id);
+    await this._callbackActions.dispatch({
+      chatId,
+      callbackQueryId: query.id,
+      data: query.data,
+    });
     return { kind: "REPLIED" };
   }
 

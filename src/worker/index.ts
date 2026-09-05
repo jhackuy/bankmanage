@@ -21,6 +21,10 @@ import { buildMiniAppAuthRouter } from "./routes/telegram-mini-app.js";
 import { CloudflareTelegramAdapter } from "../adapters/telegram/cloudflare-http.js";
 import { D1TelegramIdentityRepository } from "../services/telegram/d1-identity-repository.js";
 import { D1UpdateDeduper } from "../services/telegram/d1-update-deduper.js";
+import { TelegramReminderCallbackActions } from "../services/telegram/callback-actions.js";
+import { D1ReminderRepository } from "../services/term-deposit/d1-reminder-repository.js";
+import { D1TermDepositRepository } from "../services/term-deposit/d1-repository.js";
+import { TermDepositReminderService } from "../services/term-deposit/reminder-service.js";
 import { readAllowedUserIds } from "../services/telegram/allowed-user-ids.js";
 import type { D1Database } from "../adapters/d1/types.js";
 import type { Env } from "./env.js";
@@ -70,12 +74,28 @@ app.post("/telegram/webhook", async (c) => {
   // is the race-safe boundary across Worker isolates. An in-memory deduper
   // would be wiped by isolate recycling and never span isolates.
   const deduper = new D1UpdateDeduper(db);
+  // Per-request callback-action handler. Uses the existing M1 reminder /
+  // deposit repositories and TermDepositReminderService so no new
+  // financial surface is introduced.
+  const buildCallbackActions =
+    (): import("../services/telegram/callback-actions.js").ReminderCallbackActions => {
+      const reminderRepository = new D1ReminderRepository(db);
+      const depositRepository = new D1TermDepositRepository(db);
+      const reminderService = new TermDepositReminderService(reminderRepository, depositRepository);
+      return new TelegramReminderCallbackActions({
+        adapter,
+        reminderRepository,
+        depositRepository,
+        reminderService,
+      });
+    };
   const router = buildTelegramWebhookRouter({
     adapter,
     identityRepository,
     miniAppLauncher,
     deduper,
     allowedUserIds: allowed,
+    buildCallbackActions,
   });
   return router.fetch(c.req.raw, c.env, c.executionCtx as never);
 });

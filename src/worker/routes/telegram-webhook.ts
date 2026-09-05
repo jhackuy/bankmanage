@@ -56,6 +56,12 @@ export interface TelegramWebhookBuildInput {
   readonly allowedUserIds: AllowedUserIds | null;
   /** Optional override for the in-memory update deduper. */
   readonly deduper?: import("../../services/telegram/update-deduper.js").UpdateDeduper;
+  /**
+   * Optional factory that builds a per-request callback-actions handler.
+   * Production wires this to `TelegramReminderCallbackActions`; tests can
+   * inject a stub or omit it.
+   */
+  readonly buildCallbackActions?: () => import("../../services/telegram/callback-actions.js").ReminderCallbackActions;
 }
 
 /**
@@ -74,6 +80,7 @@ export function buildTelegramWebhookRouter(input: TelegramWebhookBuildInput): Ho
     miniAppLauncher: input.miniAppLauncher,
     allowedUserIds: input.allowedUserIds,
     ...(input.deduper !== undefined ? { deduper: input.deduper } : {}),
+    ...(input.buildCallbackActions !== undefined ? { callbackActions: input.buildCallbackActions() } : {}),
   });
   const router = new Hono<{ Bindings: Env }>();
 

@@ -24,6 +24,14 @@
 export interface UpdateDeduper {
   /** Returns true if this is the first time the id has been seen in the TTL window. */
   tryClaim(updateId: number): Promise<boolean>;
+  /**
+   * Release a previously-claimed id so a retry can succeed. Called only when
+   * downstream processing threw after a successful claim — without this,
+   * Telegram's retry would observe `tryClaim === false` and drop the update
+   * with no visible result. Idempotent: releasing a non-claimed or already-
+   * released id is a no-op.
+   */
+  release(updateId: number): Promise<void>;
   /** Clear all tracked entries (used by tests; not by the runtime). */
   reset(): void;
   /** Number of currently tracked ids — useful for assertions and capacity tests. */
@@ -56,6 +64,13 @@ export class InMemoryUpdateDeduper implements UpdateDeduper {
     }
     this._store.set(updateId, Date.now());
     return true;
+  }
+
+  async release(updateId: number): Promise<void> {
+    if (!Number.isSafeInteger(updateId) || updateId <= 0) {
+      return;
+    }
+    this._store.delete(updateId);
   }
 
   reset(): void {

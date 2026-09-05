@@ -39,6 +39,7 @@ import type { D1Database } from "../../adapters/d1/types.js";
 import type { UpdateDeduper } from "./update-deduper.js";
 
 const CLAIM_SQL = "INSERT OR IGNORE INTO telegram_update_idempotency (update_id) VALUES (?)";
+const RELEASE_SQL = "DELETE FROM telegram_update_idempotency WHERE update_id = ?";
 
 export class D1UpdateDeduper implements UpdateDeduper {
   constructor(private readonly db: D1Database) {}
@@ -54,6 +55,17 @@ export class D1UpdateDeduper implements UpdateDeduper {
     // vitest fake-D1 adapter.
     const claimed = readMetaChanges(result);
     return claimed === 1;
+  }
+
+  async release(updateId: number): Promise<void> {
+    if (!Number.isSafeInteger(updateId) || updateId <= 0) {
+      return;
+    }
+    // DELETE is idempotent at the SQL level — releasing an id that was
+    // never claimed (or already released) simply affects 0 rows. We do
+    // NOT propagate the changes count because the caller's contract is
+    // "make this id claimable again", not "verify it was claimed".
+    await this.db.prepare(RELEASE_SQL).bind(updateId).run();
   }
 
   reset(): void {

@@ -23,6 +23,14 @@ export {
   type MiniAppAuthFailure,
   type TelegramMiniAppAuthServiceOptions,
 } from "./mini-app-auth.js";
+export {
+  TelegramReminderCallbackActions,
+  type CallbackActionContext,
+  type CallbackActionOutcome,
+  type ReminderCallbackActions,
+  type SupportedCallbackAction,
+  type TelegramReminderCallbackActionsOptions,
+} from "./callback-actions.js";
 export type {
   TelegramCallbackQuery,
   TelegramChatRef,
