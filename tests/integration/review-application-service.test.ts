@@ -56,6 +56,8 @@ interface Seed {
   ownerRoleId: number;
   bankId: number;
   accountId: number;
+  uploaderAccountId: number;
+  ownerRoleAccountId: number;
   otherMemberAccountId: number;
   inactiveAccountId: number;
   eurAccountId: number;
@@ -123,6 +125,23 @@ beforeEach(async () => {
     )
     .bind(ownerId, bank.meta.last_row_id, "PHP", "BANK", "Owner Checking")
     .run();
+  // Each allowed confirmer (uploader, cross-member OWNER-role) posts against
+  // an account they own: the transactions service rejects cross-member posts
+  // independently of document-level review authorization.
+  const uploaderAcc = await db
+    .prepare(
+      `INSERT INTO accounts (member_id, bank_id, currency_code, account_type, nickname)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .bind(uploaderId, bank.meta.last_row_id, "PHP", "BANK", "Uploader Checking")
+    .run();
+  const ownerRoleAcc = await db
+    .prepare(
+      `INSERT INTO accounts (member_id, bank_id, currency_code, account_type, nickname)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .bind(ownerRoleId, bank.meta.last_row_id, "PHP", "BANK", "Second Owner Checking")
+    .run();
   const otherMember = await db
     .prepare("INSERT INTO household_members (role, display_name) VALUES (?, ?)")
     .bind("OWNER", "Other Test Owner")
@@ -168,6 +187,8 @@ beforeEach(async () => {
     ownerRoleId,
     bankId: Number(bank.meta.last_row_id),
     accountId: Number(acc.meta.last_row_id),
+    uploaderAccountId: Number(uploaderAcc.meta.last_row_id),
+    ownerRoleAccountId: Number(ownerRoleAcc.meta.last_row_id),
     otherMemberAccountId: Number(otherAcc.meta.last_row_id),
     inactiveAccountId: Number(inactiveAcc.meta.last_row_id),
     eurAccountId: Number(eurAcc.meta.last_row_id),
@@ -591,7 +612,9 @@ describe("confirmReceipt — authorization", () => {
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
 
-    const result = await reviewService.confirmReceipt(confirmInput(submit.value.session.id, seed.uploaderId));
+    const result = await reviewService.confirmReceipt(
+      confirmInput(submit.value.session.id, seed.uploaderId, { accountId: seed.uploaderAccountId })
+    );
     expect(result.ok).toBe(true);
   });
 
@@ -606,7 +629,7 @@ describe("confirmReceipt — authorization", () => {
     if (!submit.ok) return;
 
     const result = await reviewService.confirmReceipt(
-      confirmInput(submit.value.session.id, seed.ownerRoleId)
+      confirmInput(submit.value.session.id, seed.ownerRoleId, { accountId: seed.ownerRoleAccountId })
     );
     expect(result.ok).toBe(true);
   });
