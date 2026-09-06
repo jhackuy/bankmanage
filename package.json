@@ -35,7 +35,7 @@
     "better-sqlite3": "11.9.1",
     "concurrently": "9.2.0",
     "eslint": "9.32.0",
-    "prettier": "3.5.3",
+    "prettier": "3.9.6",
     "typescript": "5.8.3",
     "vite": "6.4.3",
     "vitest": "3.2.7",
