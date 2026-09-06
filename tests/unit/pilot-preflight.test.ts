@@ -38,9 +38,7 @@ describe("pilot configuration preflight", () => {
     expect(result.exit).toBe(1);
     expect(result.output).toContain("TELEGRAM_WEBHOOK_SECRET");
     expect(result.output).not.toContain(completeConfig.TELEGRAM_BOT_TOKEN);
-    expect(result.output).not.toContain(
-      completeConfig.TELEGRAM_ALLOWED_USER_IDS,
-    );
+    expect(result.output).not.toContain(completeConfig.TELEGRAM_ALLOWED_USER_IDS);
   });
 
   it("rejects the placeholder D1 database identifier", () => {
@@ -53,21 +51,14 @@ describe("pilot configuration preflight", () => {
   });
 
   it("rejects non-HTTPS and cross-origin Mini App URLs", () => {
-    expect(
-      runPreflight({ MINI_APP_URL: "http://pilot.bankmanage.example/app" })
-        .output,
-    ).toContain("MINI_APP_URL");
-    expect(
-      runPreflight({ MINI_APP_URL: "https://other.example/app" }).output,
-    ).toContain("MINI_APP_URL");
+    expect(runPreflight({ MINI_APP_URL: "http://pilot.bankmanage.example/app" }).output).toContain(
+      "MINI_APP_URL"
+    );
+    expect(runPreflight({ MINI_APP_URL: "https://other.example/app" }).output).toContain("MINI_APP_URL");
   });
 
   it("rejects malformed and duplicate two-user allowlists without echoing IDs", () => {
-    for (const value of [
-      "123456789",
-      "123456789,123456789",
-      "123456789,not-a-number",
-    ]) {
+    for (const value of ["123456789", "123456789,123456789", "123456789,not-a-number"]) {
       const result = runPreflight({ TELEGRAM_ALLOWED_USER_IDS: value });
       expect(result.exit).toBe(1);
       expect(result.output).toContain("TELEGRAM_ALLOWED_USER_IDS");
@@ -77,7 +68,6 @@ describe("pilot configuration preflight", () => {
 
   it("never prints configured values on failure", () => {
     const result = runPreflight({ MINI_APP_URL: "https://wrong.example/app" });
-    for (const value of Object.values(completeConfig))
-      expect(result.output).not.toContain(value);
+    for (const value of Object.values(completeConfig)) expect(result.output).not.toContain(value);
   });
 });
