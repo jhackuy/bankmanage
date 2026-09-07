@@ -782,39 +782,43 @@ describe("D1 migrations", () => {
          VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
       ).run(principalTxId, settlementAccountId, principalMinor, currency);
 
-      // T2 — gross interest INCOME: settlement destination / interest-income category
-      const txInterest = db
-        .prepare(
-          `INSERT INTO transactions
-             (member_id, transaction_type, currency_code, amount_minor,
-              occurred_on, description, idempotency_key, source_evidence_ref)
-           VALUES (?, 'INCOME', ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          confirmingMemberId,
-          currency,
-          grossInterestMinor,
-          actualSettlementDate,
-          "TD gross interest income",
-          `settlement-interest:${closureKey}`,
-          `doc:${documentId}`
-        );
-      const interestTxId = Number(txInterest.lastInsertRowid);
+      // T2 — gross interest INCOME: settlement destination / interest-income
+      // category. Present iff grossInterestMinor > 0; absent iff 0
+      // (required-vs-zero component presence, enforced by trigger (9)).
+      if (grossInterestMinor > 0) {
+        const txInterest = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'INCOME', ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            confirmingMemberId,
+            currency,
+            grossInterestMinor,
+            actualSettlementDate,
+            "TD gross interest income",
+            `settlement-interest:${closureKey}`,
+            `doc:${documentId}`
+          );
+        const interestTxId = Number(txInterest.lastInsertRowid);
 
-      db.prepare(
-        `INSERT INTO ledger_entries
-           (transaction_id, account_id, direction, amount_minor, currency_code, memo)
-         VALUES (?, ?, 'DEBIT', ?, ?, 'Interest credited to settlement')`
-      ).run(interestTxId, settlementAccountId, grossInterestMinor, currency);
+        db.prepare(
+          `INSERT INTO ledger_entries
+             (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'Interest credited to settlement')`
+        ).run(interestTxId, settlementAccountId, grossInterestMinor, currency);
 
-      const interestCat = db.prepare(`SELECT id FROM categories WHERE slug = 'interest-income'`).get() as {
-        id: number;
-      };
-      db.prepare(
-        `INSERT INTO ledger_entries
-           (transaction_id, category_id, direction, amount_minor, currency_code, memo)
-         VALUES (?, ?, 'CREDIT', ?, ?, 'Gross interest offset')`
-      ).run(interestTxId, interestCat.id, grossInterestMinor, currency);
+        const interestCat = db.prepare(`SELECT id FROM categories WHERE slug = 'interest-income'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries
+             (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'Gross interest offset')`
+        ).run(interestTxId, interestCat.id, grossInterestMinor, currency);
+      }
 
       // T3 — withholding tax EXPENSE (only if tax > 0)
       if (includeTax && taxMinor > 0) {
@@ -985,6 +989,18 @@ describe("D1 migrations", () => {
          VALUES (?, 'TRANSFER', 'XYZ', 1000000, '2026-04-01', ?)`
       )
       .run(f.ownerMemberId, "settlement-principal:uniq-test");
+    const principalTxId = Number(txPrincipal.lastInsertRowid);
+
+    db.prepare(
+      `INSERT INTO ledger_entries
+         (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+       VALUES (?, ?, 'CREDIT', ?, 'XYZ', 'TD principal out')`
+    ).run(principalTxId, f.tdAccountId, 1000000);
+    db.prepare(
+      `INSERT INTO ledger_entries
+         (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+       VALUES (?, ?, 'DEBIT', ?, 'XYZ', 'TD principal in')`
+    ).run(principalTxId, f.settlementAccountId, 1000000);
 
     db.prepare(
       `INSERT INTO settlement_closures
@@ -1003,7 +1019,7 @@ describe("D1 migrations", () => {
       f.documentId,
       f.ownerMemberId,
       f.settlementAccountId,
-      txPrincipal.lastInsertRowid
+      principalTxId
     );
 
     expect(() => {
@@ -1024,7 +1040,7 @@ describe("D1 migrations", () => {
         f.documentId,
         f.ownerMemberId,
         f.settlementAccountId,
-        txPrincipal.lastInsertRowid
+        principalTxId
       );
     }).toThrow();
   });
@@ -1601,5 +1617,816 @@ describe("D1 migrations", () => {
         .get(f.settlementAccountId) as { net: number }
     ).net;
     expect(settlementNet).toBe(received);
+  });
+
+  // ── M3C SETTLEMENT A1 — ledger-binding micro-repair negative tests ───────
+  // These tests exercise the six verified semantic findings from review
+  // 5135450533: each must abort the closure INSERT with zero partial
+  // mutation (count of settlement_closures = 0; count of transactions = 0).
+
+  function rowCount(sql: string): number {
+    const r = db.prepare(sql).get() as { cnt: number };
+    return r.cnt;
+  }
+
+  it("closure document_id not bound to review session is blocked (Finding 1)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    // Insert a SECOND SETTLEMENT_EVIDENCE document — the closure will
+    // reference this one instead of the session's bound document.
+    const otherDoc = db
+      .prepare(
+        `INSERT INTO documents
+           (kind, owner_member_id, uploader_member_id, content_type, byte_size, sha256_hex, object_key)
+         VALUES ('SETTLEMENT_EVIDENCE', ?, ?, 'image/png', 1024,
+                 '1111111111111111111111111111111111111111111111111111111111111111',
+                 'docs/other/' || ?)`
+      )
+      .run(f.ownerMemberId, f.ownerMemberId, `doc-other-${Date.now()}-${Math.random()}`);
+    const otherDocumentId = Number(otherDoc.lastInsertRowid);
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: f.sessionId,
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: otherDocumentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency,
+        principalMinor: 1000000,
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 1000000,
+        actualSettlementDate: "2026-04-01",
+        closureKey: f.closureKey,
+      });
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("closure principal_minor not equal to deposit.principal_minor is blocked (Finding 2)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: f.sessionId,
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: f.documentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency,
+        principalMinor: 999999, // deposit.principal_minor is 1,000,000
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 999999,
+        actualSettlementDate: "2026-04-01",
+        closureKey: f.closureKey,
+      });
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("closure currency_code not equal to deposit.currency_code is blocked (Finding 2)", () => {
+    applyMigrations(db);
+    // TD account and settlement account are XYZ; deposit.currency_code is ZYX.
+    // The closure's currency (XYZ) matches accounts, so precondition (5) passes
+    // — the mismatch with the deposit's recorded currency must fire (2).
+    const f = seedSettlementClosureFixture({ depositCurrency: "ZYX" });
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: f.sessionId,
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: f.documentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency, // XYZ
+        principalMinor: 1000000,
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 1000000,
+        actualSettlementDate: "2026-04-01",
+        closureKey: f.closureKey,
+      });
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("non-ISO actual_settlement_date is blocked at the CHECK constraint (Finding 4)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: f.sessionId,
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: f.documentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency,
+        principalMinor: 1000000,
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 1000000,
+        actualSettlementDate: "04/01/2026", // not ISO YYYY-MM-DD
+        closureKey: f.closureKey,
+      });
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("settlement_closures has UNIQUE index on review_session_id (Finding 5)", () => {
+    applyMigrations(db);
+    const idx = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_settlement_closures_session'")
+      .get() as { sql: string } | undefined;
+    expect(idx).toBeDefined();
+    expect(idx!.sql).toMatch(/\bUNIQUE\b/i);
+  });
+
+  it("settlement_closures has UNIQUE index on deposit_id (Finding 5)", () => {
+    applyMigrations(db);
+    const idx = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_settlement_closures_deposit'")
+      .get() as { sql: string } | undefined;
+    expect(idx).toBeDefined();
+    expect(idx!.sql).toMatch(/\bUNIQUE\b/i);
+  });
+
+  it("term_deposits has UNIQUE index on settlement_closure_id (Finding 5)", () => {
+    applyMigrations(db);
+    const idx = db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_term_deposits_settlement_closure_id'"
+      )
+      .get() as { sql: string } | undefined;
+    expect(idx).toBeDefined();
+    expect(idx!.sql).toMatch(/\bUNIQUE\b/i);
+  });
+
+  it("duplicate closure for the same review_session_id is blocked by UNIQUE (Finding 5)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    // First closure succeeds: session CONFIRMED, deposit SETTLED_TO_ACCOUNT.
+    performSettlementClosure({
+      db,
+      sessionId: f.sessionId,
+      depositId: f.depositId,
+      depositSourceAccountId: f.tdAccountId,
+      documentId: f.documentId,
+      confirmingMemberId: f.ownerMemberId,
+      settlementAccountId: f.settlementAccountId,
+      currency: f.currency,
+      principalMinor: 1000000,
+      grossInterestMinor: 0,
+      taxMinor: 0,
+      penaltyFeesMinor: 0,
+      receivedTotalMinor: 1000000,
+      actualSettlementDate: "2026-04-01",
+      closureKey: f.closureKey,
+    });
+    // Reset session/deposit state to bypass state preconditions. The UNIQUE
+    // index on review_session_id is the defense-in-depth backstop.
+    const dupKey = `${f.closureKey}-dup-session`;
+    db.prepare(
+      "UPDATE review_sessions SET status = 'PENDING_REVIEW', linked_transaction_id = NULL, post_idempotency_key = ? WHERE id = ?"
+    ).run(dupKey, f.sessionId);
+    db.prepare(
+      "UPDATE term_deposits SET state = 'MATURED_ACTION_REQUIRED', settlement_evidence_ref = NULL, maturity_settlement_account_id = NULL, settlement_closure_id = NULL WHERE id = ?"
+    ).run(f.depositId);
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: f.sessionId,
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: f.documentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency,
+        principalMinor: 1000000,
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 1000000,
+        actualSettlementDate: "2026-04-01",
+        closureKey: dupKey,
+      });
+    }).toThrow();
+    // Only the canonical row remains; second attempt was rejected by UNIQUE.
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(1);
+  });
+
+  it("duplicate closure for the same deposit_id is blocked by UNIQUE (Finding 5)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    performSettlementClosure({
+      db,
+      sessionId: f.sessionId,
+      depositId: f.depositId,
+      depositSourceAccountId: f.tdAccountId,
+      documentId: f.documentId,
+      confirmingMemberId: f.ownerMemberId,
+      settlementAccountId: f.settlementAccountId,
+      currency: f.currency,
+      principalMinor: 1000000,
+      grossInterestMinor: 0,
+      taxMinor: 0,
+      penaltyFeesMinor: 0,
+      receivedTotalMinor: 1000000,
+      actualSettlementDate: "2026-04-01",
+      closureKey: f.closureKey,
+    });
+    // Create a SECOND SETTLEMENT review session for the SAME deposit, then
+    // reset deposit state to bypass the state-precondition. The UNIQUE
+    // index on deposit_id is the backstop that must fire.
+    const dupKey = `${f.closureKey}-dup-deposit`;
+    const session2 = db
+      .prepare(
+        `INSERT INTO review_sessions
+           (kind, status, document_id, deposit_id, confirming_member_id,
+            review_decision_json, candidate_payload_json, corrected_payload_json,
+            post_idempotency_key)
+         VALUES ('SETTLEMENT', 'PENDING_REVIEW', ?, ?, ?, '{}', '{}', '{}', ?)`
+      )
+      .run(f.documentId, f.depositId, f.ownerMemberId, dupKey);
+    db.prepare(
+      "UPDATE term_deposits SET state = 'MATURED_ACTION_REQUIRED', settlement_evidence_ref = NULL, maturity_settlement_account_id = NULL, settlement_closure_id = NULL WHERE id = ?"
+    ).run(f.depositId);
+    expect(() => {
+      performSettlementClosure({
+        db,
+        sessionId: Number(session2.lastInsertRowid),
+        depositId: f.depositId,
+        depositSourceAccountId: f.tdAccountId,
+        documentId: f.documentId,
+        confirmingMemberId: f.ownerMemberId,
+        settlementAccountId: f.settlementAccountId,
+        currency: f.currency,
+        principalMinor: 1000000,
+        grossInterestMinor: 0,
+        taxMinor: 0,
+        penaltyFeesMinor: 0,
+        receivedTotalMinor: 1000000,
+        actualSettlementDate: "2026-04-01",
+        closureKey: dupKey,
+      });
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(1);
+  });
+
+  it("omitted principal TRANSFER bundle aborts closure with zero mutation (Finding 3 omitted)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    // Write NO ledger entries, then INSERT the closure row with a sentinel
+    // (0) for principal_transfer_transaction_id. The BEFORE trigger (8)
+    // requires a real TRANSFER bundle to exist for the closure key.
+    expect(() => {
+      db.transaction(() => {
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   0)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          1000000,
+          1000000
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("substituted principal TRANSFER with wrong amount aborts closure with zero mutation (Finding 3 substituted)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principalClaimed = 1000000;
+    const principalBooked = 999999; // off by 1 minor unit
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principalBooked,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principalBooked, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principalBooked, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principalClaimed,
+          principalClaimed,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("malformed interest bundle (wrong category) aborts closure with zero mutation (Finding 3 malformed)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    const grossInterest = 80000;
+    const received = principal + grossInterest;
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        // Malformed interest TX: type and amount are right but the category
+        // is wrong (withholding-tax instead of interest-income).
+        const txInterest = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'INCOME', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            grossInterest,
+            "TD gross interest income",
+            `settlement-interest:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const interestTxId = Number(txInterest.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'Interest credited')`
+        ).run(interestTxId, f.settlementAccountId, grossInterest, f.currency);
+        const wrongCat = db.prepare(`SELECT id FROM categories WHERE slug = 'withholding-tax'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'Wrong-category credit')`
+        ).run(interestTxId, wrongCat.id, grossInterest, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          grossInterest,
+          received,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("omitted interest bundle when gross_interest > 0 aborts with zero mutation (Finding 6 required-vs-zero)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    const grossInterest = 80000;
+    const tax = 10000;
+    const received = principal + grossInterest - tax;
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        const txTax = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'EXPENSE', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            tax,
+            "Withholding tax on interest",
+            `settlement-tax:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const taxTxId = Number(txTax.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'Tax debited')`
+        ).run(taxTxId, f.settlementAccountId, tax, f.currency);
+        const taxCat = db.prepare(`SELECT id FROM categories WHERE slug = 'withholding-tax'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'Tax expense offset')`
+        ).run(taxTxId, taxCat.id, tax, f.currency);
+
+        // Omit the interest bundle — claim gross_interest_minor = 80_000 but
+        // never write the INCOME transaction.
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          grossInterest,
+          tax,
+          received,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("interest bundle present when gross_interest == 0 aborts with zero mutation (Finding 6 required-vs-zero)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        // Spurious interest TX that must NOT exist when gross_interest = 0.
+        const txInterest = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'INCOME', ?, 1, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            "Spurious interest",
+            `settlement-interest:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const interestTxId = Number(txInterest.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', 1, ?, 'Spurious interest in')`
+        ).run(interestTxId, f.settlementAccountId, f.currency);
+        const interestCat = db.prepare(`SELECT id FROM categories WHERE slug = 'interest-income'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', 1, ?, 'Spurious interest offset')`
+        ).run(interestTxId, interestCat.id, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("tax bundle present when tax_minor == 0 aborts with zero mutation (Finding 6 required-vs-zero)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        // Spurious tax TX that must NOT exist when tax_minor = 0.
+        const txTax = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'EXPENSE', ?, 1, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            "Spurious tax",
+            `settlement-tax:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const taxTxId = Number(txTax.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', 1, ?, 'Spurious tax out')`
+        ).run(taxTxId, f.settlementAccountId, f.currency);
+        const taxCat = db.prepare(`SELECT id FROM categories WHERE slug = 'withholding-tax'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', 1, ?, 'Spurious tax offset')`
+        ).run(taxTxId, taxCat.id, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  it("penalty bundle present when penalty_fees_minor == 0 aborts with zero mutation (Finding 6 required-vs-zero)", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        // Spurious penalty TX that must NOT exist when penalty_fees_minor = 0.
+        const txPen = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'EXPENSE', ?, 1, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            "Spurious penalty",
+            `settlement-penalty:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const penTxId = Number(txPen.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', 1, ?, 'Spurious penalty out')`
+        ).run(penTxId, f.settlementAccountId, f.currency);
+        const penCat = db.prepare(`SELECT id FROM categories WHERE slug = 'early-termination'`).get() as {
+          id: number;
+        };
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, category_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', 1, ?, 'Spurious penalty offset')`
+        ).run(penTxId, penCat.id, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
   });
 });
