@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS settlement_closures (
   penalty_fees_minor              INTEGER NOT NULL DEFAULT 0 CHECK (penalty_fees_minor >= 0),
   received_total_minor            INTEGER NOT NULL CHECK (received_total_minor >= 0),
   actual_settlement_date          TEXT    NOT NULL CHECK (
-    date(actual_settlement_date) = actual_settlement_date
+    length(actual_settlement_date) = 10
+    AND actual_settlement_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    AND date(actual_settlement_date) IS NOT NULL
+    AND date(actual_settlement_date) = actual_settlement_date
   ),
 
   -- Canonical ledger linkage. The principal transfer is the audit anchor
