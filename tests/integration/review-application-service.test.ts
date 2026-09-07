@@ -49,7 +49,11 @@ import {
   D1TransactionsRepository,
   TransactionApplicationService,
 } from "../../src/services/transactions/index.js";
-import type { ConfirmReceiptInput, SubmitForReviewInput } from "../../src/services/review/types.js";
+import type {
+  ConfirmDepositInput,
+  ConfirmReceiptInput,
+  SubmitForReviewInput,
+} from "../../src/services/review/types.js";
 import type { OcrExtractionResult } from "../../src/adapters/ocr/interface.js";
 
 // ── Seed helpers ─────────────────────────────────────────────────────────────
@@ -1527,5 +1531,319 @@ describe("review_sessions — claim-token protocol interleaving", () => {
     // confirmSession clears claim_token on finalize.
     expect(persisted?.claim_token).toBeNull();
     expect(persisted?.linked_transaction_id).toBe(retry.value.transactionId);
+  });
+});
+
+// ── confirmDeposit — idempotency / concurrency ───────────────────────────────
+//
+// PHASE 2A test completion for the M3C DEPOSIT slice. The production wiring
+// (term_deposits.idempotency_key UNIQUE, claim-then-createDraft-then-
+// confirmSession ordering) is already in place; these tests exercise the
+// production-path stack through FakeD1 to prove:
+//   1. Concurrent same-key confirmDeposit produces exactly one DRAFT
+//      term_deposits row and both callers recover the canonical depositId.
+//   2. A same-key retry after createDraft-success / confirmSession-failure
+//      links the original deposit with no duplicate row.
+//   3. A different key is rejected with SESSION_CLAIM_CONFLICT before any
+//      second term_deposits row is created, while the session's claim
+//      slot is retained by the first key.
+
+async function countTermDeposits(): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS c FROM term_deposits").first<{ c: number }>();
+  return row?.c ?? 0;
+}
+
+async function insertTermDepositAccount(): Promise<number> {
+  const result = await db
+    .prepare(
+      `INSERT INTO accounts (member_id, bank_id, currency_code, account_type, nickname)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .bind(seed.ownerId, seed.bankId, "PHP", "TERM_DEPOSIT", "Owner Term Deposit")
+    .run();
+  return Number(result.meta.last_row_id);
+}
+
+async function uploadAndSubmitDepositSession(seedStr: string): Promise<{
+  documentId: number;
+  sessionId: number;
+}> {
+  const { documentId } = await uploadReceipt(seed.ownerId, seed.uploaderId, seedStr);
+  const submit = await reviewService.submitForReview({
+    kind: "DEPOSIT",
+    documentId,
+    ocrResult: highConfidenceOcr(),
+    confirmingMemberId: seed.ownerId,
+  });
+  if (!submit.ok) throw new Error(`submitForReview(DEPOSIT) failed: ${submit.error.message}`);
+  return { documentId, sessionId: submit.value.session.id };
+}
+
+function depositInput(
+  sessionId: number,
+  memberId: number,
+  accountId: number,
+  overrides: Partial<ConfirmDepositInput> = {}
+): ConfirmDepositInput {
+  return {
+    sessionId,
+    memberId,
+    accountId,
+    bankId: seed.bankId,
+    currencyCode: "PHP",
+    productName: "1-Year Special TD",
+    certificateLastFour: "5678",
+    principalMinor: 500_000,
+    startDate: "2026-04-01",
+    maturityDate: "2027-04-01",
+    annualRateScaled: 45_000,
+    taxRateScaled: 200_000,
+    feesMinor: 0,
+    interestMethod: "SIMPLE",
+    dayCountBasis: "ACT_365",
+    idempotencyKey: `deposit-key-${sessionId}`,
+    ...overrides,
+  };
+}
+
+describe("confirmDeposit — idempotency", () => {
+  it("concurrent same-key confirmDeposit produces exactly one DRAFT deposit and both callers recover the canonical deposit", async () => {
+    const accountId = await insertTermDepositAccount();
+    const { documentId, sessionId } = await uploadAndSubmitDepositSession("deposit-same-key");
+    const sharedKey = "concurrent-deposit-key";
+
+    const [a, b] = await Promise.all([
+      reviewService.confirmDeposit(
+        depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: sharedKey })
+      ),
+      reviewService.confirmDeposit(
+        depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: sharedKey })
+      ),
+    ]);
+
+    // Both must succeed (idempotent retry of the same key).
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+
+    // Both callers recover the same canonical depositId.
+    expect(a.value.depositId).not.toBeNull();
+    expect(b.value.depositId).not.toBeNull();
+    expect(a.value.depositId).toBe(b.value.depositId);
+
+    // Exactly one term_deposits row exists, persisted as DRAFT with the
+    // document audit linkage "doc:<documentId>" and the shared key.
+    expect(await countTermDeposits()).toBe(1);
+    const persisted = await db
+      .prepare("SELECT id, state, source_evidence_ref, idempotency_key FROM term_deposits WHERE id = ?")
+      .bind(a.value.depositId)
+      .first<{ id: number; state: string; source_evidence_ref: string; idempotency_key: string }>();
+    expect(persisted?.state).toBe("DRAFT");
+    expect(persisted?.source_evidence_ref).toBe(`doc:${documentId}`);
+    expect(persisted?.idempotency_key).toBe(sharedKey);
+
+    // The session is CONFIRMED and bound to the single depositId; no
+    // transaction row was created (DEPOSIT writes the term_deposits row,
+    // not a transaction).
+    expect(await countTransactions()).toBe(0);
+    const session = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id, deposit_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+        deposit_id: number;
+      }>();
+    expect(session?.status).toBe("CONFIRMED");
+    expect(session?.post_idempotency_key).toBe(sharedKey);
+    expect(session?.claim_token).toBeNull();
+    expect(session?.linked_transaction_id).toBeNull();
+    expect(session?.deposit_id).toBe(a.value.depositId);
+  });
+
+  it("a same-key retry after createDraft-success / confirmSession-failure links the original deposit with no duplicate", async () => {
+    const accountId = await insertTermDepositAccount();
+    const { documentId, sessionId } = await uploadAndSubmitDepositSession("deposit-confirm-retry");
+
+    // Wrap the production reviewRepo so confirmSession throws on the
+    // first call, simulating a forced finalize failure between
+    // createDraft and the confirm UPDATE. claimSession, findById, and
+    // the term-deposit path are unchanged.
+    let confirmCalls = 0;
+    const flakyReviewRepo: ReviewSessionRepository = new Proxy(reviewRepo, {
+      get(target, prop, receiver) {
+        if (prop === "confirmSession") {
+          return async (...args: unknown[]) => {
+            confirmCalls += 1;
+            if (confirmCalls === 1) {
+              throw new Error("forced confirmSession failure");
+            }
+            return (target.confirmSession as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ReviewSessionRepository;
+    const flakyService = new ReviewApplicationService(
+      flakyReviewRepo,
+      docService,
+      txService,
+      new TermDepositApplicationService(new D1TermDepositRepository(db)),
+      accountRepo,
+      categoryRepo
+    );
+
+    const sharedKey = "deposit-confirm-retry-key";
+    await expect(
+      flakyService.confirmDeposit(
+        depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: sharedKey })
+      )
+    ).rejects.toThrow("forced confirmSession failure");
+
+    // createDraft succeeded (DRAFT row persisted with the shared key and
+    // the document audit linkage) but confirmSession threw. The session
+    // is still PENDING_REVIEW with the claim slot retained by the
+    // token-owning caller — exactly the recoverable mid-write state.
+    expect(await countTermDeposits()).toBe(1);
+    const afterFail = await db
+      .prepare("SELECT id, state, source_evidence_ref, idempotency_key FROM term_deposits WHERE id = ?")
+      .bind(
+        (await db.prepare("SELECT id FROM term_deposits ORDER BY id ASC LIMIT 1").first<{ id: number }>())
+          ?.id ?? -1
+      )
+      .first<{ id: number; state: string; source_evidence_ref: string; idempotency_key: string }>();
+    expect(afterFail?.state).toBe("DRAFT");
+    expect(afterFail?.source_evidence_ref).toBe(`doc:${documentId}`);
+    expect(afterFail?.idempotency_key).toBe(sharedKey);
+
+    const persistedSession = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id, deposit_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string | null;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+        deposit_id: number | null;
+      }>();
+    expect(persistedSession?.status).toBe("PENDING_REVIEW");
+    expect(persistedSession?.post_idempotency_key).toBe(sharedKey);
+    expect(persistedSession?.claim_token).not.toBeNull();
+    expect(persistedSession?.deposit_id).toBeNull();
+    expect(persistedSession?.linked_transaction_id).toBeNull();
+
+    // Retry with the SAME key — claim returns ALREADY_CLAIMED_SAME_KEY,
+    // createDraft sees the existing term_deposits row (UNIQUE on
+    // idempotency_key keeps it a no-op), confirmSession succeeds on
+    // attempt #2.
+    const retry = await flakyService.confirmDeposit(
+      depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: sharedKey })
+    );
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+
+    // No second deposit row was created — term_deposits.idempotency_key
+    // UNIQUE is the deposit-layer idempotency boundary. The session is
+    // CONFIRMED and bound to the original depositId.
+    expect(await countTermDeposits()).toBe(1);
+    const retryDeposit = await db
+      .prepare("SELECT id, state, source_evidence_ref, idempotency_key FROM term_deposits WHERE id = ?")
+      .bind(retry.value.depositId)
+      .first<{ id: number; state: string; source_evidence_ref: string; idempotency_key: string }>();
+    expect(retryDeposit?.state).toBe("DRAFT");
+    expect(retryDeposit?.source_evidence_ref).toBe(`doc:${documentId}`);
+    expect(retryDeposit?.idempotency_key).toBe(sharedKey);
+
+    const finalized = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id, deposit_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+        deposit_id: number;
+      }>();
+    expect(finalized?.status).toBe("CONFIRMED");
+    expect(finalized?.post_idempotency_key).toBe(sharedKey);
+    expect(finalized?.claim_token).toBeNull();
+    expect(finalized?.linked_transaction_id).toBeNull();
+    expect(finalized?.deposit_id).toBe(retry.value.depositId);
+  });
+
+  it("a different-key confirmDeposit is rejected with SESSION_CLAIM_CONFLICT before any second deposit creation while the session claim is retained", async () => {
+    const accountId = await insertTermDepositAccount();
+    const { sessionId } = await uploadAndSubmitDepositSession("deposit-diff-key");
+
+    // Pre-claim the session slot directly with the first key — simulates
+    // an in-flight original caller that has already won the claim race.
+    const claim = await reviewRepo.claimSession(sessionId, "first-key", "DEPOSIT");
+    expect(claim.code).toBe("CLAIMED");
+
+    // A confirmDeposit with a DIFFERENT key must be rejected with
+    // SESSION_CLAIM_CONFLICT before any term_deposits row is created.
+    const blocked = await reviewService.confirmDeposit(
+      depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: "second-key" })
+    );
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.error.code).toBe("SESSION_CLAIM_CONFLICT");
+
+    expect(await countTermDeposits()).toBe(0);
+    expect(await countTransactions()).toBe(0);
+
+    // The session's claim slot is RETAINED by the first key — status
+    // still PENDING_REVIEW, post_idempotency_key = "first-key",
+    // claim_token still populated so the same key can retry to recover.
+    const persisted = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, linked_transaction_id, deposit_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string | null;
+        claim_token: string | null;
+        linked_transaction_id: number | null;
+        deposit_id: number | null;
+      }>();
+    expect(persisted?.status).toBe("PENDING_REVIEW");
+    expect(persisted?.post_idempotency_key).toBe("first-key");
+    expect(persisted?.claim_token).not.toBeNull();
+    expect(persisted?.linked_transaction_id).toBeNull();
+    expect(persisted?.deposit_id).toBeNull();
+
+    // The same-key caller can still recover: confirmDeposit with the
+    // first key is admitted (ALREADY_CLAIMED_SAME_KEY) and finalizes.
+    const sameKey = await reviewService.confirmDeposit(
+      depositInput(sessionId, seed.ownerId, accountId, { idempotencyKey: "first-key" })
+    );
+    expect(sameKey.ok).toBe(true);
+    if (!sameKey.ok) return;
+
+    expect(await countTermDeposits()).toBe(1);
+    const recovered = await db
+      .prepare(
+        "SELECT status, post_idempotency_key, claim_token, deposit_id FROM review_sessions WHERE id = ?"
+      )
+      .bind(sessionId)
+      .first<{
+        status: string;
+        post_idempotency_key: string;
+        claim_token: string | null;
+        deposit_id: number;
+      }>();
+    expect(recovered?.status).toBe("CONFIRMED");
+    expect(recovered?.post_idempotency_key).toBe("first-key");
+    expect(recovered?.claim_token).toBeNull();
+    expect(recovered?.deposit_id).toBe(sameKey.value.depositId);
   });
 });
