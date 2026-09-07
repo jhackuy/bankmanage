@@ -50,6 +50,7 @@ export interface TermDepositRecord {
   readonly successorDepositId: number | null;
   readonly sourceEvidenceRef: string | null;
   readonly settlementEvidenceRef: string | null;
+  readonly idempotencyKey: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

@@ -54,6 +54,7 @@ interface TermDepositRow {
   successor_deposit_id: number | null;
   source_evidence_ref: string | null;
   settlement_evidence_ref: string | null;
+  idempotency_key: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -86,6 +87,7 @@ function rowToRecord(row: TermDepositRow): TermDepositRecord {
     successorDepositId: row.successor_deposit_id,
     sourceEvidenceRef: row.source_evidence_ref,
     settlementEvidenceRef: row.settlement_evidence_ref,
+    idempotencyKey: row.idempotency_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -123,7 +125,8 @@ export class D1TermDepositRepository implements TermDepositRepository {
            bank_quoted_maturity_amount_minor,
            maturity_instruction, maturity_settlement_account_id,
            predecessor_deposit_id,
-           source_evidence_ref
+           source_evidence_ref,
+           idempotency_key
          ) VALUES (
            ?, ?, ?, ?,
            ?, ?, ?,
@@ -132,6 +135,7 @@ export class D1TermDepositRepository implements TermDepositRepository {
            ?, ?,
            ?, ?, ?,
            ?, ?,
+           ?,
            ?,
            ?
          )
@@ -159,13 +163,22 @@ export class D1TermDepositRepository implements TermDepositRepository {
         input.maturityInstruction ?? "PENDING",
         input.maturitySettlementAccountId ?? null,
         input.predecessorDepositId ?? null,
-        input.sourceEvidenceRef ?? null
+        input.sourceEvidenceRef ?? null,
+        input.idempotencyKey ?? null
       );
     const row = await stmt.first<TermDepositRow>();
     if (row === null) {
       throw new Error("insertDraft: RETURNING produced no row");
     }
     return rowToRecord(row);
+  }
+
+  async findByIdempotencyKey(key: string): Promise<TermDepositRecord | null> {
+    const row = await this.db
+      .prepare("SELECT * FROM term_deposits WHERE idempotency_key = ?")
+      .bind(key)
+      .first<TermDepositRow>();
+    return row === null ? null : rowToRecord(row);
   }
 
   async findById(id: number): Promise<TermDepositRecord | null> {

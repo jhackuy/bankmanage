@@ -146,4 +146,13 @@ export interface TermDepositRepository {
    * existence checks).
    */
   loadDepositContext(id: number): Promise<{ id: number } | null>;
+
+  /**
+   * SELECT the existing DRAFT/REVIEW_REQUIRED row that already holds the
+   * supplied idempotency_key, if any. Used by `TermDepositApplicationService.
+   * createDraft` to honor the persisted idempotency boundary (migration 0013):
+   * a same-key retry resolves to the canonical existing record instead of
+   * producing a duplicate deposit. Returns null when no row matches.
+   */
+  findByIdempotencyKey(key: string): Promise<TermDepositRecord | null>;
 }

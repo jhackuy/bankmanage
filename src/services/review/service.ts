@@ -566,6 +566,7 @@ export class ReviewApplicationService {
         ? { maturitySettlementAccountId: input.maturitySettlementAccountId }
         : {}),
       sourceEvidenceRef: `doc:${session.documentId}`,
+      idempotencyKey: input.idempotencyKey,
     });
     if (!createResult.ok) {
       return fail(mapTdCreateError(createResult.error.code), createResult.error.message);
