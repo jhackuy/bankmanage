@@ -53,6 +53,7 @@ try {
     "account_reconciliations",
     "documents",
     "review_sessions",
+    "settlement_closures",
   ];
 
   for (const table of expectedTables) {
