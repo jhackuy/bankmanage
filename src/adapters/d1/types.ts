@@ -17,7 +17,7 @@ export interface D1ResultMeta {
   readonly duration: number;
   readonly changes: number;
   readonly last_row_id: number | null;
-  readonly served_by: string;
+  readonly served_by?: string;
   readonly rows_read: number;
   readonly rows_written: number;
 }

@@ -1,0 +1,249 @@
+/**
+ * Telegram bot service.
+ *
+ * Owns the bot command / callback surface area:
+ *   - `/start`           → welcome message + Mini App entry.
+ *   - Callback queries   → acknowledged PROMPTLY (before any slower work)
+ *                          so Telegram removes the loading spinner; the
+ *                          real work happens after the ack.
+ *   - Unknown commands   → a kind nudge, never an error.
+ *
+ * SPEC.md §9 contracts enforced here:
+ *   - "The Bot must acknowledge callbacks promptly before slow work."
+ *   - "Duplicate button taps must not duplicate financial writes."
+ *
+ * Idempotency lives at two layers:
+ *   1. The Update deduper (`UpdateDeduper`) stops a replayed update_id
+ *      from reaching the handler at all.
+ *   2. The downstream business services (term-deposit reminder,
+ *      cancellation, muting) are UNIQUE-constraint-idempotent so a
+ *      collision that somehow slips past the deduper still cannot
+ *      double-write.
+ *
+ * The service exposes no financial mutation paths; financial state never
+ * moves through the bot beyond reminder/mute actions, both of which go
+ * through the existing application services.
+ */
+
+import type { MemberRole, SendMessageOptions, TelegramAdapter } from "../../adapters/telegram/interface.js";
+import type { TelegramIdentityRepository } from "./identity-repository.js";
+import { InMemoryUpdateDeduper, type UpdateDeduper } from "./update-deduper.js";
+import type {
+  TelegramCallbackQuery,
+  TelegramMessage,
+  TelegramUpdateEnvelope,
+  VerifiedTelegramUser,
+} from "./update-envelope.js";
+import { parseTelegramUpdate } from "./update-parser.js";
+import type { AllowedUserIds } from "./allowed-user-ids.js";
+import type { ReminderCallbackActions } from "./callback-actions.js";
+
+const START_COMMAND = "/start";
+
+/** Keyboard button returned by `/start` for opening the Mini App. */
+export interface MiniAppLaunchButton {
+  readonly text: string;
+  readonly url: string;
+}
+
+/**
+ * Provides the Mini App launch URL. Kept as a tiny port so the route
+ * handler (which knows the deployed URL) can inject it without coupling
+ * the bot service to wrangler config.
+ */
+export interface MiniAppLauncher {
+  buildLaunchButton(chatId: string): MiniAppLaunchButton;
+}
+
+export interface TelegramBotServiceOptions {
+  readonly adapter: TelegramAdapter;
+  readonly identityRepository: TelegramIdentityRepository;
+  readonly miniAppLauncher: MiniAppLauncher;
+  readonly allowedUserIds: AllowedUserIds;
+  readonly deduper?: UpdateDeduper;
+  /**
+   * Optional callback-query action handler. When present, known callback
+   * data (`r:{reminderId}:view` and `r:{reminderId}:mute`) produces a
+   * visible result message after the ACK. When absent, the bot service
+   * still ACKs but does not act on callback data.
+   */
+  readonly callbackActions?: ReminderCallbackActions;
+}
+
+export type BotHandlerResult =
+  | { readonly kind: "REPLIED" }
+  | { readonly kind: "IGNORED"; readonly reason: string }
+  | { readonly kind: "REJECTED"; readonly reason: string };
+
+export interface UpdateDispatchResult {
+  readonly updateId: number;
+  readonly handled: boolean;
+  readonly bot: BotHandlerResult | null;
+}
+
+const REJECT_UNKNOWN_USER = "Unknown Telegram user — not on allowlist";
+const IGNORE_DUPLICATE = "Duplicate update (already handled)";
+const IGNORE_UNKNOWN_COMMAND = "Unknown bot command";
+
+export class TelegramBotService {
+  private readonly _adapter: TelegramAdapter;
+  private readonly _identities: TelegramIdentityRepository;
+  private readonly _launcher: MiniAppLauncher;
+  private readonly _allowed: AllowedUserIds;
+  private readonly _deduper: UpdateDeduper;
+  private readonly _callbackActions: ReminderCallbackActions | null;
+
+  constructor(opts: TelegramBotServiceOptions) {
+    this._adapter = opts.adapter;
+    this._identities = opts.identityRepository;
+    this._launcher = opts.miniAppLauncher;
+    this._allowed = opts.allowedUserIds;
+    this._deduper = opts.deduper ?? new InMemoryUpdateDeduper();
+    this._callbackActions = opts.callbackActions ?? null;
+  }
+
+  /**
+   * Dispatch a single Telegram update. Returns a result object describing
+   * what happened. Never throws for "expected" failures (unknown user,
+   * duplicate update, malformed text); only throws for impossible programmer
+   * errors.
+   */
+  async dispatchUpdate(rawUpdate: unknown): Promise<UpdateDispatchResult> {
+    let envelope: TelegramUpdateEnvelope;
+    try {
+      envelope = parseTelegramUpdate(rawUpdate);
+    } catch {
+      return { updateId: -1, handled: false, bot: { kind: "REJECTED", reason: "Malformed update" } };
+    }
+
+    if (!(await this._deduper.tryClaim(envelope.updateId))) {
+      return {
+        updateId: envelope.updateId,
+        handled: false,
+        bot: { kind: "IGNORED", reason: IGNORE_DUPLICATE },
+      };
+    }
+
+    // The claim above is atomic at the SQL level (UNIQUE update_id). If
+    // any downstream work below throws (transport failure, DB outage),
+    // we MUST release the claim so a Telegram retry can re-claim and
+    // deliver the visible result. Without release, Telegram's retry would
+    // observe tryClaim === false and the user would see the spinner
+    // resolve with no message — silently lost work.
+    try {
+      if (envelope.callbackQuery !== null) {
+        const botResult = await this.handleCallback(envelope.callbackQuery);
+        return { updateId: envelope.updateId, handled: true, bot: botResult };
+      }
+
+      if (envelope.message !== null) {
+        const botResult = await this.handleMessage(envelope.message);
+        return { updateId: envelope.updateId, handled: true, bot: botResult };
+      }
+
+      return {
+        updateId: envelope.updateId,
+        handled: true,
+        bot: { kind: "IGNORED", reason: "No message or callback_query in update" },
+      };
+    } catch (err) {
+      // Release the claim so the retry path can succeed. We swallow any
+      // release-side failure (e.g. DB is also down) — the retry will
+      // still see a consistent state on the next attempt.
+      try {
+        await this._deduper.release(envelope.updateId);
+      } catch {
+        // intentionally swallowed
+      }
+      throw err;
+    }
+  }
+
+  private async handleMessage(message: TelegramMessage): Promise<BotHandlerResult> {
+    if (message.from === null) {
+      return { kind: "IGNORED", reason: "Message has no sender" };
+    }
+    const senderId = String(message.from.id);
+    // SPEC §2: every webhook update is checked against the two-user
+    // allowlist. We intersect the managed binding with the persisted
+    // identity — either check alone is insufficient.
+    if (!this._allowed.ids.has(senderId)) {
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+    const identity = await this._identities.findByTelegramUserId(senderId);
+    if (identity === null) {
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+
+    const text = message.text.trim();
+    if (text === START_COMMAND || text.startsWith(`${START_COMMAND}@`)) {
+      const verified: VerifiedTelegramUser = {
+        telegramUserId: String(message.from.id),
+        chatId: String(message.chat.id),
+        memberId: identity.memberId,
+        role: identity.role,
+        displayFirstName: message.from.firstName,
+        username: message.from.username,
+      };
+      return this.handleStart(verified);
+    }
+
+    return { kind: "IGNORED", reason: IGNORE_UNKNOWN_COMMAND };
+  }
+
+  private async handleStart(verified: VerifiedTelegramUser): Promise<BotHandlerResult> {
+    const button = this._launcher.buildLaunchButton(verified.chatId);
+    const welcomeText = formatStartWelcome(verified.displayFirstName, verified.role);
+    const options: SendMessageOptions = {
+      replyMarkup: {
+        inline_keyboard: [[{ text: button.text, url: button.url }]],
+      },
+    };
+    const sent = await this._adapter.sendMessage(verified.chatId, welcomeText, options);
+    if (sent.messageId <= 0) {
+      return { kind: "REJECTED", reason: "sendMessage returned no id" };
+    }
+    return { kind: "REPLIED" };
+  }
+
+  private async handleCallback(query: TelegramCallbackQuery): Promise<BotHandlerResult> {
+    // SPEC §9: "The Bot must acknowledge callbacks promptly before slow
+    // work." Telegram shows a loading spinner until answerCallbackQuery
+    // returns. We acknowledge first, then perform any real follow-up.
+    await this._adapter.answerCallbackQuery(query.id, "Working...");
+
+    const senderId = String(query.from.id);
+    if (!this._allowed.ids.has(senderId)) {
+      // Already acknowledged above — no further state mutation is possible.
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+    const identity = await this._identities.findByTelegramUserId(senderId);
+    if (identity === null) {
+      // Already acknowledged above — no further state mutation is possible.
+      return { kind: "REJECTED", reason: REJECT_UNKNOWN_USER };
+    }
+
+    if (this._callbackActions === null) {
+      // No action handler wired for this environment (e.g. tests). ACK
+      // was issued; nothing more to do.
+      return { kind: "REPLIED" };
+    }
+
+    const chatId = query.message !== null ? String(query.message.chat.id) : String(query.from.id);
+    await this._callbackActions.dispatch({
+      chatId,
+      callbackQueryId: query.id,
+      data: query.data,
+    });
+    return { kind: "REPLIED" };
+  }
+
+  /** Test/diagnostic helper: clear the deduper. */
+  resetDeduper(): void {
+    this._deduper.reset();
+  }
+}
+
+export function formatStartWelcome(firstName: string, role: MemberRole): string {
+  return `Hi ${firstName}, welcome to BankManage.\n\nYou are signed in as ${role}.\nTap the button below to open the Mini App.`;
+}

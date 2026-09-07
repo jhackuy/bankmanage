@@ -42,6 +42,14 @@ export const REMINDER_STATUSES: readonly ReminderStatus[] = ["PENDING", "MUTED",
  * Logical reminder record. One row per (deposit_id, offset_kind); the UNIQUE
  * constraint on that pair is the idempotency boundary enforced by the D1
  * repository layer.
+ *
+ * `claimedAt` and `claimToken` together form the lease-based delivery-claim
+ * boundary added in migrations 0015 and 0016. `claimForDelivery` sets both
+ * atomically and returns the opaque token to the caller; `markDelivered`
+ * and `releaseClaim` require the same token to take effect. A row whose
+ * lease has expired (claimed_at is older than the lease timeout) can be
+ * re-claimed by a later cron tick, but only the current claimant's token
+ * can finalize or clear the row.
  */
 export interface ReminderRecord {
   readonly id: number;
@@ -52,6 +60,8 @@ export interface ReminderRecord {
   readonly mutedAt: string | null;
   readonly deliveredAt: string | null;
   readonly cancelledAt: string | null;
+  readonly claimedAt: string | null;
+  readonly claimToken: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
