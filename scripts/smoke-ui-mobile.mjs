@@ -95,18 +95,29 @@ function pickIndexHtml(distDir, fsImpl) {
   return join(distDir, candidates[0]);
 }
 
+function listFilesRecursive(dir, fsImpl) {
+  const files = [];
+  for (const name of fsImpl.readdirSync(dir)) {
+    const full = join(dir, name);
+    const stat = fsImpl.statSync(full);
+    if (stat.isDirectory()) files.push(...listFilesRecursive(full, fsImpl));
+    else files.push(full);
+  }
+  return files;
+}
+
 function pickJsBundle(distDir, fsImpl) {
-  const entries = fsImpl.readdirSync(distDir);
-  const candidates = entries.filter((f) => f.endsWith(".js") && !f.endsWith(".js.map"));
-  if (candidates.length === 0) return null;
-  return join(distDir, candidates[0]);
+  const candidates = listFilesRecursive(distDir, fsImpl)
+    .filter((f) => f.endsWith(".js") && !f.endsWith(".js.map"))
+    .sort();
+  return candidates[0] ?? null;
 }
 
 function pickCssBundle(distDir, fsImpl) {
-  const entries = fsImpl.readdirSync(distDir);
-  const candidates = entries.filter((f) => f.endsWith(".css") && !f.endsWith(".css.map"));
-  if (candidates.length === 0) return null;
-  return join(distDir, candidates[0]);
+  const candidates = listFilesRecursive(distDir, fsImpl)
+    .filter((f) => f.endsWith(".css") && !f.endsWith(".css.map"))
+    .sort();
+  return candidates[0] ?? null;
 }
 
 function checkHtml(indexPath, fsImpl) {
@@ -170,12 +181,9 @@ function checkJsBundle(jsPath, fsImpl) {
 
 function checkNoPublicBucketUrls(distDir, fsImpl) {
   const offenders = [];
-  for (const name of fsImpl.readdirSync(distDir)) {
-    if (name.endsWith(".map")) continue;
-    const full = join(distDir, name);
-    const st = fsImpl.statSync(full);
-    if (st.isDirectory()) continue;
-    if (!/\.(html|js|css)$/iu.test(name)) continue;
+  for (const full of listFilesRecursive(distDir, fsImpl)) {
+    const name = full.slice(distDir.length + 1);
+    if (name.endsWith(".map") || !/\.(html|js|css)$/iu.test(name)) continue;
     const text = fsImpl.readFileSync(full, "utf8");
     for (const pattern of FORBIDDEN_PUBLIC_BUCKET_PATTERNS) {
       if (pattern.test(text)) {
