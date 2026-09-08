@@ -26,7 +26,7 @@ function makeFakeDistDir(): string {
 }
 
 function writeConformingUi(dir: string): void {
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, "assets"), { recursive: true });
   writeFileSync(
     join(dir, "index.html"),
     `<!doctype html>
@@ -73,7 +73,7 @@ function writeCustomUi(dir: string, overrides: DistOverrides, removeExisting = f
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
   }
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, "assets"), { recursive: true });
   if (overrides.html !== undefined) writeFileSync(join(dir, "index.html"), overrides.html);
   if (overrides.css !== undefined) {
     writeFileSync(join(dir, overrides.cssName ?? "assets/index.css"), overrides.css);
