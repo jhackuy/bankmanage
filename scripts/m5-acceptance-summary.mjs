@@ -103,7 +103,7 @@ export function buildM5AcceptanceSummary(env, options = {}) {
       synthesisesRealUsers: false,
       echoesSecrets: false,
       notes:
-        "No real Telegram user IDs, account numbers, receipts, or tokens are recorded. The summary records configuration NAMES (e.g. TELEGRAM_BOT_TOKEN) but never their values. Real-user evidence belongs in a separate ownership process, not this script.",
+        "No real Telegram user IDs, account numbers, receipts, or tokens are recorded. The summary records configuration names-only (e.g. TELEGRAM_BOT_TOKEN), never their values. Real-user evidence belongs in a separate ownership process, not this script.",
     },
   };
 }
