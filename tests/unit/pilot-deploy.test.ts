@@ -33,12 +33,14 @@ const VALID_PILOT_ENV = {
 };
 
 function makeFakeDistUi(parent: string): string {
-  const dir = mkdtempSync(join(parent, "fake-dist-"));
-  mkdirSync(dir, { recursive: true });
+  const dir = join(parent, "dist", "ui");
+  mkdirSync(join(dir, "assets"), { recursive: true });
   writeFileSync(
     join(dir, "index.html"),
-    '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body><div id="app"></div></body></html>'
+    '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><script src="https://telegram.org/js/telegram-web-app.js"></script></head><body><div id="app"></div><script type="module" src="/assets/index.js"></script></body></html>'
   );
+  writeFileSync(join(dir, "assets/index.js"), "const HomePage=1,ReceiptPage=1,DepositsPage=1;export{HomePage,ReceiptPage,DepositsPage};");
+  writeFileSync(join(dir, "assets/index.css"), ".tab-item{min-height:52px}body{overflow-x:hidden;padding-bottom:env(safe-area-inset-bottom)}@media (prefers-reduced-motion: reduce){*{transition:none}}.receipt-primary-action{}");
   return dir;
 }
 
@@ -80,7 +82,7 @@ describe("planPilotDeploy (library)", () => {
     const env = { ...VALID_PILOT_ENV, CLOUDFLARE_D1_DATABASE_ID: "bad-id" };
     const plan = (await planPilotDeploy(env, { repoRoot })) as unknown as PlanSummary;
     expect(plan.ok).toBe(false);
-    expect(plan.blockedStep).toBe("d1-resolve");
+    expect(plan.blockedStep).toBe("pilot-preflight");
   });
 
   it("fails closed when built dist/ui/ is missing", async () => {
