@@ -52,6 +52,8 @@ try {
     "term_deposit_reminders",
     "account_reconciliations",
     "documents",
+    "review_sessions",
+    "settlement_closures",
   ];
 
   for (const table of expectedTables) {

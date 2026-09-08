@@ -50,6 +50,7 @@ export interface TermDepositRecord {
   readonly successorDepositId: number | null;
   readonly sourceEvidenceRef: string | null;
   readonly settlementEvidenceRef: string | null;
+  readonly idempotencyKey: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -94,6 +95,17 @@ export interface CreateDraftInput {
   readonly bankQuotedGrossInterestMinor?: number;
   readonly bankQuotedNetInterestMinor?: number;
   readonly bankQuotedMaturityAmountMinor?: number;
+  /**
+   * Optional creation idempotency key. The UNIQUE partial index on
+   * `term_deposits.idempotency_key` (migration 0013) makes the key the
+   * authoritative race-safe boundary for concurrent same-key creation
+   * attempts; on UNIQUE collision the service resolves the call to the
+   * existing canonical row rather than producing a duplicate deposit.
+   * Mirrors the protocol used by transactions.idempotency_key
+   * (RECEIPT flow) and review_sessions.post_idempotency_key (claim
+   * protocol).
+   */
+  readonly idempotencyKey?: string;
 }
 
 /**
@@ -152,6 +164,7 @@ export type ServiceErrorCode =
   | "ILLEGAL_TRANSITION"
   | "STALE_STATE"
   | "DUPLICATE_LINK"
+  | "DUPLICATE_IDEMPOTENCY_KEY"
   | "OVERFLOW"
   | "INTERNAL";
 

@@ -118,6 +118,29 @@ export class TermDepositApplicationService {
     const validation = await this.validateCreateInput(input);
     if (!validation.ok) return validation;
 
+    // Idempotency pre-check: if the caller supplied a key and a row already
+    // holds it, return the canonical existing record instead of INSERTing a
+    // duplicate. Mirrors transactions.idempotency_key (RECEIPT) and the
+    // review-sessions claim protocol. This handles the common case; the
+    // UNIQUE-collision branch in the catch below covers the race where a
+    // sibling request inserts between the pre-check and INSERT.
+    if (input.idempotencyKey !== undefined && input.idempotencyKey !== null && input.idempotencyKey !== "") {
+      const existing = await this.repo.findByIdempotencyKey(input.idempotencyKey);
+      if (existing !== null) {
+        const priorEstimate = calculateEstimate({
+          principalMinor: existing.principalMinor,
+          annualRateScaled: existing.annualRateScaled,
+          taxRateScaled: existing.taxRateScaled,
+          feesMinor: existing.feesMinor,
+          startDate: existing.startDate,
+          maturityDate: existing.maturityDate,
+          interestMethod: existing.interestMethod,
+          dayCountBasis: existing.dayCountBasis,
+        });
+        return ok({ record: existing, estimate: priorEstimate });
+      }
+    }
+
     // Compute the deterministic estimate from the validated input BEFORE
     // INSERT. The inputs already passed validateCreateInput, so the only
     // remaining throw from calculateEstimate is a safe-integer overflow on
@@ -159,6 +182,37 @@ export class TermDepositApplicationService {
         return fail(
           "DUPLICATE_LINK",
           `predecessor deposit ${input.predecessorDepositId} already has a successor`
+        );
+      }
+      // Race-safe boundary on idempotency_key: a concurrent sibling request
+      // won the race and persisted a row with the same key between our
+      // pre-check and our INSERT. Resolve the call to the canonical row the
+      // sibling created rather than surfacing a generic INTERNAL failure or
+      // a duplicate deposit.
+      if (
+        input.idempotencyKey !== undefined &&
+        input.idempotencyKey !== null &&
+        input.idempotencyKey !== "" &&
+        err instanceof Error &&
+        /UNIQUE constraint failed: term_deposits\.idempotency_key/i.test(err.message)
+      ) {
+        const canonical = await this.repo.findByIdempotencyKey(input.idempotencyKey);
+        if (canonical !== null) {
+          const canonicalEstimate = calculateEstimate({
+            principalMinor: canonical.principalMinor,
+            annualRateScaled: canonical.annualRateScaled,
+            taxRateScaled: canonical.taxRateScaled,
+            feesMinor: canonical.feesMinor,
+            startDate: canonical.startDate,
+            maturityDate: canonical.maturityDate,
+            interestMethod: canonical.interestMethod,
+            dayCountBasis: canonical.dayCountBasis,
+          });
+          return ok({ record: canonical, estimate: canonicalEstimate });
+        }
+        return fail(
+          "DUPLICATE_IDEMPOTENCY_KEY",
+          `idempotency key ${input.idempotencyKey} already persisted but the canonical row could not be reloaded`
         );
       }
       return fail("INTERNAL", "Unable to create term deposit");
