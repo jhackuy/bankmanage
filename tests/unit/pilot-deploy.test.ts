@@ -39,8 +39,14 @@ function makeFakeDistUi(parent: string): string {
     join(dir, "index.html"),
     '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><script src="https://telegram.org/js/telegram-web-app.js"></script></head><body><div id="app"></div><script type="module" src="/assets/index.js"></script></body></html>'
   );
-  writeFileSync(join(dir, "assets/index.js"), "const HomePage=1,ReceiptPage=1,DepositsPage=1;export{HomePage,ReceiptPage,DepositsPage};");
-  writeFileSync(join(dir, "assets/index.css"), ".tab-item{min-height:52px}body{overflow-x:hidden;padding-bottom:env(safe-area-inset-bottom)}@media (prefers-reduced-motion: reduce){*{transition:none}}.receipt-primary-action{}");
+  writeFileSync(
+    join(dir, "assets/index.js"),
+    "const HomePage=1,ReceiptPage=1,DepositsPage=1;export{HomePage,ReceiptPage,DepositsPage};"
+  );
+  writeFileSync(
+    join(dir, "assets/index.css"),
+    ".tab-item{min-height:52px}body{overflow-x:hidden;padding-bottom:env(safe-area-inset-bottom)}@media (prefers-reduced-motion: reduce){*{transition:none}}.receipt-primary-action{}"
+  );
   return dir;
 }
 
