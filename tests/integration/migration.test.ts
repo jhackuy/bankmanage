@@ -985,10 +985,10 @@ describe("D1 migrations", () => {
     const f = seedSettlementClosureFixture({ sessionKey: "uniq-test" });
     const txPrincipal = db
       .prepare(
-        `INSERT INTO transactions (member_id, transaction_type, currency_code, amount_minor, occurred_on, idempotency_key)
-         VALUES (?, 'TRANSFER', 'XYZ', 1000000, '2026-04-01', ?)`
+        `INSERT INTO transactions (member_id, transaction_type, currency_code, amount_minor, occurred_on, idempotency_key, source_evidence_ref)
+         VALUES (?, 'TRANSFER', 'XYZ', 1000000, '2026-04-01', ?, ?)`
       )
-      .run(f.ownerMemberId, "settlement-principal:uniq-test");
+      .run(f.ownerMemberId, "settlement-principal:uniq-test", `doc:${f.documentId}`);
     const principalTxId = Number(txPrincipal.lastInsertRowid);
 
     db.prepare(
@@ -2428,5 +2428,375 @@ describe("D1 migrations", () => {
     }).toThrow();
     expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
     expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+  });
+
+  // ── FINAL HEADER-BINDING REPAIR: negative tests for principal header fields ──
+
+  it("substituted principal anchor (t.id mismatch) aborts closure with zero mutation", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        // Real principal transaction: canonical derived key, all header fields correct.
+        const txReal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const realTxId = Number(txReal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(realTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(realTxId, f.settlementAccountId, principal, f.currency);
+
+        // Substitute transaction: different idempotency_key, otherwise correct.
+        const txSub = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "Substitute principal transfer",
+            `settlement-substitute:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const substituteTxId = Number(txSub.lastInsertRowid);
+
+        // Closure claims the substitute as the canonical principal anchor.
+        // Trigger (8) requires t.id = NEW.principal_transfer_transaction_id
+        // AND t.idempotency_key = derived key. The real row matches the key
+        // but has the wrong id; the substitute has the right id but the
+        // wrong key. No row satisfies both → NOT EXISTS → RAISE(ABORT).
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          substituteTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+    const dep = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(f.depositId) as {
+      state: string;
+    };
+    expect(dep.state).toBe("MATURED_ACTION_REQUIRED");
+    const ses = db.prepare("SELECT status FROM review_sessions WHERE id = ?").get(f.sessionId) as {
+      status: string;
+    };
+    expect(ses.status).toBe("PENDING_REVIEW");
+  });
+
+  it("wrong principal member_id aborts closure with zero mutation", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        // Principal transaction with wrong member_id (MEMBER instead of OWNER).
+        // Trigger (8) requires t.member_id = NEW.confirming_member_id.
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.otherMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+    const dep = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(f.depositId) as {
+      state: string;
+    };
+    expect(dep.state).toBe("MATURED_ACTION_REQUIRED");
+    const ses = db.prepare("SELECT status FROM review_sessions WHERE id = ?").get(f.sessionId) as {
+      status: string;
+    };
+    expect(ses.status).toBe("PENDING_REVIEW");
+  });
+
+  it("wrong principal occurred_on aborts closure with zero mutation", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        // Principal transaction with wrong occurred_on.
+        // Trigger (8) requires t.occurred_on = NEW.actual_settlement_date.
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "2026-03-01",
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+    const dep = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(f.depositId) as {
+      state: string;
+    };
+    expect(dep.state).toBe("MATURED_ACTION_REQUIRED");
+    const ses = db.prepare("SELECT status FROM review_sessions WHERE id = ?").get(f.sessionId) as {
+      status: string;
+    };
+    expect(ses.status).toBe("PENDING_REVIEW");
+  });
+
+  it("wrong principal source_evidence_ref aborts closure with zero mutation", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        // Principal transaction with wrong source_evidence_ref.
+        // Trigger (8) requires t.source_evidence_ref = 'doc:' || NEW.document_id.
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?)`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            "doc:99999"
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+    const dep = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(f.depositId) as {
+      state: string;
+    };
+    expect(dep.state).toBe("MATURED_ACTION_REQUIRED");
+    const ses = db.prepare("SELECT status FROM review_sessions WHERE id = ?").get(f.sessionId) as {
+      status: string;
+    };
+    expect(ses.status).toBe("PENDING_REVIEW");
+  });
+
+  it("wrong principal state (REVERSED) aborts closure with zero mutation", () => {
+    applyMigrations(db);
+    const f = seedSettlementClosureFixture();
+    const principal = 1000000;
+    expect(() => {
+      db.transaction(() => {
+        // Principal transaction with state = 'REVERSED' instead of 'POSTED'.
+        // Trigger (8) requires t.state = 'POSTED'.
+        const txPrincipal = db
+          .prepare(
+            `INSERT INTO transactions
+               (member_id, transaction_type, currency_code, amount_minor,
+                occurred_on, description, idempotency_key, source_evidence_ref, state)
+             VALUES (?, 'TRANSFER', ?, ?, '2026-04-01', ?, ?, ?, 'REVERSED')`
+          )
+          .run(
+            f.ownerMemberId,
+            f.currency,
+            principal,
+            "TD principal transfer",
+            `settlement-principal:${f.closureKey}`,
+            `doc:${f.documentId}`
+          );
+        const principalTxId = Number(txPrincipal.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'CREDIT', ?, ?, 'TD principal out')`
+        ).run(principalTxId, f.tdAccountId, principal, f.currency);
+        db.prepare(
+          `INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_minor, currency_code, memo)
+           VALUES (?, ?, 'DEBIT', ?, ?, 'TD principal in')`
+        ).run(principalTxId, f.settlementAccountId, principal, f.currency);
+
+        db.prepare(
+          `INSERT INTO settlement_closures
+             (idempotency_key, review_session_id, deposit_id, document_id,
+              confirming_member_id, settlement_account_id, currency_code,
+              principal_minor, gross_interest_minor, tax_minor, penalty_fees_minor,
+              received_total_minor, actual_settlement_date,
+              principal_transfer_transaction_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?,
+                   ?, 0, 0, 0, ?, '2026-04-01',
+                   ?)`
+        ).run(
+          f.closureKey,
+          f.sessionId,
+          f.depositId,
+          f.documentId,
+          f.ownerMemberId,
+          f.settlementAccountId,
+          f.currency,
+          principal,
+          principal,
+          principalTxId
+        );
+      })();
+    }).toThrow();
+    expect(rowCount("SELECT COUNT(*) as cnt FROM settlement_closures")).toBe(0);
+    expect(rowCount("SELECT COUNT(*) as cnt FROM transactions")).toBe(0);
+    const dep = db.prepare("SELECT state FROM term_deposits WHERE id = ?").get(f.depositId) as {
+      state: string;
+    };
+    expect(dep.state).toBe("MATURED_ACTION_REQUIRED");
+    const ses = db.prepare("SELECT status FROM review_sessions WHERE id = ?").get(f.sessionId) as {
+      status: string;
+    };
+    expect(ses.status).toBe("PENDING_REVIEW");
   });
 });

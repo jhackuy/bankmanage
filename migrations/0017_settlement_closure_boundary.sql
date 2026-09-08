@@ -202,15 +202,24 @@ BEGIN
 
   -- (8) Principal TRANSFER bundle: header, balanced source CREDIT and
   --     destination DEBIT (exactly two ledger entries, currency-matched).
+  --     The principal transaction selected by the derived idempotency
+  --     key MUST be the canonical principal_transfer_transaction_id,
+  --     and its header fields MUST bind to the closure facts:
+  --     confirming member, settlement date, doc:<id> evidence, POSTED.
   SELECT RAISE(ABORT, 'settlement_closure: principal transfer bundle invalid')
   WHERE NOT EXISTS (
     SELECT 1
     FROM transactions t
     JOIN term_deposits td ON td.id = NEW.deposit_id
     WHERE t.idempotency_key = 'settlement-principal:' || NEW.idempotency_key
+      AND t.id = NEW.principal_transfer_transaction_id
       AND t.transaction_type = 'TRANSFER'
       AND t.amount_minor = NEW.principal_minor
       AND t.currency_code = NEW.currency_code
+      AND t.member_id = NEW.confirming_member_id
+      AND t.occurred_on = NEW.actual_settlement_date
+      AND t.source_evidence_ref = 'doc:' || NEW.document_id
+      AND t.state = 'POSTED'
       AND (SELECT COALESCE(SUM(amount_minor), 0)
              FROM ledger_entries
             WHERE transaction_id = t.id
@@ -239,6 +248,10 @@ BEGIN
         AND t.transaction_type = 'INCOME'
         AND t.amount_minor = NEW.gross_interest_minor
         AND t.currency_code = NEW.currency_code
+        AND t.member_id = NEW.confirming_member_id
+        AND t.occurred_on = NEW.actual_settlement_date
+        AND t.source_evidence_ref = 'doc:' || NEW.document_id
+        AND t.state = 'POSTED'
         AND (SELECT COALESCE(SUM(amount_minor), 0)
                FROM ledger_entries
               WHERE transaction_id = t.id
@@ -274,6 +287,10 @@ BEGIN
         AND t.transaction_type = 'EXPENSE'
         AND t.amount_minor = NEW.tax_minor
         AND t.currency_code = NEW.currency_code
+        AND t.member_id = NEW.confirming_member_id
+        AND t.occurred_on = NEW.actual_settlement_date
+        AND t.source_evidence_ref = 'doc:' || NEW.document_id
+        AND t.state = 'POSTED'
         AND (SELECT COALESCE(SUM(amount_minor), 0)
                FROM ledger_entries
               WHERE transaction_id = t.id
@@ -309,6 +326,10 @@ BEGIN
         AND t.transaction_type = 'EXPENSE'
         AND t.amount_minor = NEW.penalty_fees_minor
         AND t.currency_code = NEW.currency_code
+        AND t.member_id = NEW.confirming_member_id
+        AND t.occurred_on = NEW.actual_settlement_date
+        AND t.source_evidence_ref = 'doc:' || NEW.document_id
+        AND t.state = 'POSTED'
         AND (SELECT COALESCE(SUM(amount_minor), 0)
                FROM ledger_entries
               WHERE transaction_id = t.id
