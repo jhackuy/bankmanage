@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -33,10 +33,13 @@ const VALID_ENV = {
 
 function makeFakeDistDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "m5-summary-dist-"));
+  mkdirSync(join(dir, "assets"), { recursive: true });
   writeFileSync(
     join(dir, "index.html"),
-    '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body><div id="app"></div></body></html>'
+    '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><script src="https://telegram.org/js/telegram-web-app.js"></script></head><body><div id="app"></div><script type="module" src="/assets/index.js"></script></body></html>'
   );
+  writeFileSync(join(dir, "assets/index.js"), "const HomePage=1,ReceiptPage=1,DepositsPage=1;export{HomePage,ReceiptPage,DepositsPage};");
+  writeFileSync(join(dir, "assets/index.css"), ".tab-item{min-height:52px}body{overflow-x:hidden;padding-bottom:env(safe-area-inset-bottom)}@media (prefers-reduced-motion: reduce){*{transition:none}}.receipt-primary-action{}");
   return dir;
 }
 
