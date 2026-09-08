@@ -19,6 +19,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "migrate:check": "node scripts/migrate-check.mjs",
+    "pilot:preflight": "node scripts/pilot-preflight.mjs",
+    "pilot:d1": "node scripts/d1-resolve.mjs",
+    "pilot:migrate-plan": "node scripts/migrate-apply.mjs --plan-only",
+    "pilot:smoke:ui": "node scripts/smoke-ui-mobile.mjs",
+    "pilot:plan": "node scripts/pilot-deploy.mjs",
+    "m5:summary": "node scripts/m5-acceptance-summary.mjs",
     "deploy": "wrangler deploy --env pilot"
   },
   "dependencies": {

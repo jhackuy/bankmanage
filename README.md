@@ -1,6 +1,6 @@
 # bankmanage
 
-家庭银行存单、资产与日常财务管理工具。当前阶段：**Cloudflare-first pilot，M0 已完成，M1 开发中**。
+家庭银行存单、资产与日常财务管理工具。当前阶段：**Cloudflare-first pilot，M0–M4 已完成；M5 pilot 部署与验收工具已就绪，等待真实凭据 + Workflows 写权限**。
 
 所有产品实现必须以 `SPEC.md` 为业务事实源；Accepted ADR 是架构事实源。
 
@@ -83,7 +83,7 @@ npm run build
 npm run dev
 ```
 
-`.dev.vars` 只用于本地真实集成且永远不得提交；M0-M3 的正常单元/集成测试默认不需要真实服务凭据。
+`.dev.vars` 只用于本地真实集成且永远不得提交；M0-M4 的正常单元/集成测试默认不需要真实服务凭据。
 
 ## Cloudflare pilot
 
@@ -102,11 +102,26 @@ npx wrangler deploy --env pilot
 
 真实 secret 使用 `wrangler secret put ... --env pilot` 设置，不写入仓库。
 
+### M5 pilot orchestration (operators)
+
+`npm run pilot:*` 系列脚本是 M5 引入的、**全部只读 / names-only** 的部署前序工具。它们从不打印 secret，亦不会自行调用 `wrangler deploy` 或 `wrangler d1 migrations apply`；失败时仅返回缺失或非法字段名，待 OWNER 补齐托管配置后再执行实际部署。
+
+```bash
+npm run pilot:preflight      # 校验 CLOUDFLARE_* / TELEGRAM_* / *_URL 配置
+npm run pilot:d1             # 解析 CLOUDFLARE_D1 配置，仅输出字段名
+npm run pilot:migrate-plan   # 生成前向迁移计划（plan-only，默认无副作用）
+npm run pilot:smoke:ui       # 对 dist/ui 进行 360/390/430 静态契约检查
+npm run pilot:plan           # 串联上述检查并输出无副作用命令计划
+npm run m5:summary           # 输出机器可读的 M5 验收摘要（JSON）
+```
+
+部署工作流（`.github/workflows/pilot-deploy.yml`）的接入将在 GitHub App 获得 `Workflows: write` 权限后由独立的 OWNER 流程接入，不在本任务范围内。
+
 ## Milestones
 
 - M0 — Done: scaffold, CI, D1 schema, adapters, Mini App shell.
-- M1 — In progress: term deposits, interest calculations, state machine, reminders.
-- M2 — Pending: household ledger, quick expenses, reconciliation.
-- M3 — Pending: private R2 document upload, OCR adapter/benchmark.
-- M4 — Pending: Telegram webhook, initData auth, Bot reminders.
-- M5 — Pending: pilot deployment, smoke tests, security review.
+- M1 — Done: term deposits, interest calculations, state machine, reminders.
+- M2 — Done: household ledger, quick expenses, reconciliation, reports.
+- M3 — Done: private R2 document upload, OCR adapter/benchmark, review flows.
+- M4 — Done: Telegram webhook, initData auth, two-user allowlist, Bot reminders.
+- M5 — Pilot deployment tooling in place; wiring of the protected deployment workflow is deferred to when GitHub `Workflows: write` permission is available on the App. Operators run `npm run pilot:*` locally against managed configuration; the deployment workflow itself (`.github/workflows/pilot-deploy.yml`) was intentionally not added in this slice because the runner lacked `Workflows` write permission.
