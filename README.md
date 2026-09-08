@@ -1,6 +1,6 @@
 # bankmanage
 
-家庭银行存单、资产与日常财务管理工具。当前阶段：**Cloudflare-first pilot，M0 已完成，M1 开发中**。
+家庭银行存单、资产与日常财务管理工具。当前阶段：**Cloudflare-first pilot，M0–M5 全部完成，等待 Workflows write 权限解锁后接入 GitHub Actions 部署工作流**。
 
 所有产品实现必须以 `SPEC.md` 为业务事实源；Accepted ADR 是架构事实源。
 
@@ -91,12 +91,41 @@ npm run dev
 
 真实部署只允许在已接受代码进入 `main` 后的 deployment job 中使用 GitHub/Cloudflare secrets。PR/Agent 实现阶段必须使用 fake/local bindings，不得连接生产/pilot 凭据。
 
-基础命令：
+### M5 deployment tooling
+
+M5 把 pilot 部署拆成可独立审计的 fail-closed 步骤，全部脚本默认 inert，缺少必需配置时在调用任何外部 mutation 之前报错并仅打印 NAMES：
+
+| 脚本                                | 作用                                                                                                           |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `scripts/pilot-preflight.mjs`       | 校验完整 pilot 配置（names-only 报告）。                                                                       |
+| `scripts/d1-resolve.mjs`            | 解析 managed D1 `account_id` / `database_id`。                                                                 |
+| `scripts/migrate-apply.mjs`         | 按字典序枚举 forward migration；`--apply` 仅在持有 `BANKMANAGE_MIGRATIONS_APPLY_TOKEN` 时升级为 apply intent。 |
+| `scripts/post-deploy-smoke.mjs`     | 对部署后 baseUrl 做黑盒 `/health` / webhook secret / Mini App 根路径 / 隐私 URL 探测。                         |
+| `scripts/smoke-ui-mobile.mjs`       | 静态校验 `dist/ui/` 满足 SPEC §10 / §10.1（360/390/430、safe-area、reduced-motion 等）。                       |
+| `scripts/m5-acceptance-summary.mjs` | 生成 machine-readable M5 验收 JSON，不输出任何真实凭据 / 用户证据。                                            |
+| `scripts/pilot-deploy.mjs`          | 编排上述步骤并产出 names-only command plan。                                                                   |
+
+构建产物：
+
+```bash
+npm run build
+```
+
+部署前手动 smoke（在 GitHub Actions 部署 job 不可用时）：
+
+```bash
+node scripts/pilot-preflight.mjs
+node scripts/d1-resolve.mjs
+node scripts/migrate-apply.mjs --plan-only
+node scripts/pilot-deploy.mjs --smoke-base-url="https://<pilot-host>"
+node scripts/m5-acceptance-summary.mjs --out=dist/m5-acceptance.json
+```
+
+真实部署仍只通过 Cloudflare 凭据完成；本仓库不会触发 wrangler deploy。
 
 ```bash
 npx wrangler d1 create bankmanage-pilot
 npx wrangler r2 bucket create bankmanage-pilot-docs
-npm run build
 npx wrangler deploy --env pilot
 ```
 
@@ -105,8 +134,8 @@ npx wrangler deploy --env pilot
 ## Milestones
 
 - M0 — Done: scaffold, CI, D1 schema, adapters, Mini App shell.
-- M1 — In progress: term deposits, interest calculations, state machine, reminders.
-- M2 — Pending: household ledger, quick expenses, reconciliation.
-- M3 — Pending: private R2 document upload, OCR adapter/benchmark.
-- M4 — Pending: Telegram webhook, initData auth, Bot reminders.
-- M5 — Pending: pilot deployment, smoke tests, security review.
+- M1 — Done: term deposits, interest calculations, state machine, reminders.
+- M2 — Done: household ledger, quick expenses, reconciliation.
+- M3 — Done: private R2 document upload, OCR adapter/benchmark, review flows.
+- M4 — Done: Telegram webhook, initData auth, Bot reminders, two-user allowlist.
+- M5 — Done (pushable slice): fail-closed preflight, managed D1 resolution, forward-migration planner, post-deploy black-box smoke, static Mini App UI smoke for 360/390/430, machine-readable M5 acceptance summary, names-only deploy orchestration. GitHub Actions deployment workflow is deferred until the App has Workflows write permission — see `.github/workflows/pilot-preflight.yml` for the existing preflight step.
