@@ -22,7 +22,7 @@
     "deploy": "wrangler deploy --env pilot"
   },
   "dependencies": {
-    "hono": "4.13.5",
+    "hono": "4.13.11",
     "preact": "10.25.4"
   },
   "devDependencies": {
